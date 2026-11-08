@@ -30,14 +30,12 @@ Training the `[2 -> 5 -> 10 -> 15 -> 10 -> 2]` MLP from scratch using purely geo
 
 ---
 
-### 2. Layerwise Pullback Metric, Volume, Anisotropy & Curvature (Cross-Entropy Baseline)
-When trained with standard **Cross-Entropy loss**, the `[2 -> 5 -> 10 -> 15 -> 10 -> 2]` MLP progressively warps the pullback metric tensor $g^{(\ell)}_{ij}(x)$ and Gaussian curvature $K^{(\ell)}(x)$ across depth $\ell = 1 \to 5$. Feature learning breaks initialization symmetry and concentrates local volume expansion $\sqrt{\det g^{(\ell)}(x)}$, spectral condition number $\lambda_1(g^{(\ell)})/\lambda_2(g^{(\ell)})$, and sharp curvature ridges along the nonlinear decision boundary between the two moons:
+### 2. $3 \times 4$ Cross-Evaluation Matrix of Final-Layer Geometric Fields Across Experiments
+Evaluating all three geometric invariants at the final layer ($\ell = 5$)—**Gaussian Curvature** $\operatorname{arcsinh}(K^{(5)}(x))$, **Log Volume Density** $\log\sqrt{\det g^{(5)}(x)}$, and **Metric Anisotropy** $\log(g^{(5)}_{11}(x)/g^{(5)}_{22}(x))$—across all four trained networks (`RdBu_r` centered at $0.0 = \text{white}$) reveals how each geometric loss selectively sculpts its target geometric field to separate Class $0$ (blue, $< 0$) from Class $1$ (red, $> 0$) along the zero contour (black):
 
-![Layerwise Pullback Metric Volume Element and Anisotropy Across Depth](assets/layerwise_pullback_metrics.png)
+![3x4 Matrix of Final-Layer Geometric Fields Across Experiments](assets/geometric_fields_matrix_3x4.png)
 
-![Layerwise Gaussian Curvature Landscape Across Depth](assets/layerwise_curvature_landscape.png)
-
-| Layer $\ell$ | Transformation | Width $d_\ell$ | Median Volume $\sqrt{\det g^{(\ell)}}$ | Max Volume $\sqrt{\det g^{(\ell)}}$ | Median Anisotropy $\lambda_1 / \lambda_2$ |
+| Layer $\ell$ (CE Baseline) | Transformation | Width $d_\ell$ | Median Volume $\sqrt{\det g^{(\ell)}}$ | Max Volume $\sqrt{\det g^{(\ell)}}$ | Median Anisotropy $\lambda_1 / \lambda_2$ |
 | :---: | :--- | :---: | :---: | :---: | :---: |
 | $\ell = 1$ | $2 \to 5$ (Expansion) | $5$ | `0.2651` | `1.2096` | `4.15` |
 | $\ell = 2$ | $5 \to 10$ (Expansion) | $10$ | `0.3057` | `4.6523` | `10.43` |
@@ -81,8 +79,7 @@ diffgeom/
 │   └── build_all_notebooks.py                                # Rebuilds and executes all 5 notebooks end-to-end
 └── assets/
     ├── decision_landscapes.png                               # 4-panel comparison of learned geometric decision boundaries
-    ├── layerwise_pullback_metrics.png                        # 10-panel layerwise volume & anisotropy heatmaps across L1..L5 (CE baseline)
-    ├── layerwise_curvature_landscape.png                     # 5-panel layerwise Gaussian curvature heatmaps across L1..L5 (CE baseline)
+    ├── geometric_fields_matrix_3x4.png                       # 3x4 matrix of final-layer curvature, log volume & anisotropy across experiments
     └── compute_memory_benchmark.png                          # 3-panel latency, memory, and autograd node scaling chart
 ```
 

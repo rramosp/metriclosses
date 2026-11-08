@@ -1642,6 +1642,112 @@ plt.tight_layout()
 plt.show()
 """,
         },
+        {
+            "type": "markdown",
+            "source": r"""
+## 7. $3 \times 4$ Cross-Evaluation Matrix of Final-Layer Geometric Fields Across All Experiments
+
+Finally, we evaluate **all three differential-geometric measures** at the final layer ($\ell = 5$) across **all four trained networks** in the 2D input space $(x^1, x^2)$:
+- **Rows (Geometric Measures at Layer $\ell = 5$)**:
+  1. **Row 1 — Gaussian Curvature**: $\operatorname{arcsinh}\!\big(K^{(5)}(x)\big)$ (Graph metric $\tilde{g}^{(5)} = I_2 + (J^{(5)})^T J^{(5)}$; $0 = \text{flat}$).
+  2. **Row 2 — Log Volume Density**: $\log\sqrt{\det g^{(5)}(x)}$ (Euclidean pullback $g^{(5)} = (J^{(5)})^T J^{(5)}$; $0 = \text{equiareal}$).
+  3. **Row 3 — Metric Anisotropy**: $\log\!\big(g^{(5)}_{11}(x) / g^{(5)}_{22}(x)\big)$ (Directional metric ratio; $0 = \text{isotropic } g_{11}=g_{22}$).
+- **Columns (Training Experiments)**:
+  1. **Column 1**: Cross-Entropy Baseline
+  2. **Column 2**: Curvature Margin Loss ($K < 0$ vs. $K > 0$)
+  3. **Column 3**: Volume-Element Loss ($\log\sqrt{\det g} < 0$ vs. $> 0$)
+  4. **Column 4**: Metric Anisotropy Loss ($\log(g_{11}/g_{22}) < 0$ vs. $> 0$)
+
+All plots use the symmetric `RdBu_r` colormap centered at **$0.0$ (white)**, with the zero-level contour ($0.0$) drawn in black.
+""",
+        },
+        {
+            "type": "code",
+            "source": """
+from matplotlib.colors import TwoSlopeNorm
+
+exp_columns = [
+    ("Cross-Entropy Baseline", m_ce),
+    ("Curvature Loss (K < 0 vs K > 0)", m_curv),
+    ("Volume-Element Loss", m_vol),
+    ("Metric Anisotropy Loss", m_aniso),
+]
+
+row_labels = [
+    "Gaussian Curvature\\n$\\mathrm{arcsinh}(K^{(5)}(x))$",
+    "Log Volume Density\\n$\\log\\sqrt{\\det g^{(5)}(x)}$",
+    "Metric Anisotropy\\n$\\log(g^{(5)}_{11}(x) / g^{(5)}_{22}(x))$",
+]
+
+def evaluate_final_layer_fields(mdl: MoonsMLP, pts: torch.Tensor):
+    # 1. Gaussian curvature K^(5) via Graph metric
+    geom_graph = compute_layer_geometry(mdl, pts, layer_idx=5, metric_mode="graph")
+    curv_field = np.arcsinh(geom_graph["K"].detach().numpy())
+
+    # 2. Log volume density log sqrt(det g^(5)) via Euclidean pullback
+    g_eucl = compute_layer_pullback_metric(mdl, pts, layer_idx=5, metric_mode="euclidean", eps=1e-6)
+    log_vol_field = (0.5 * torch.log(torch.clamp(torch.linalg.det(g_eucl), min=1e-8))).detach().numpy()
+
+    # 3. Metric anisotropy log(g_11 / g_22) via Graph metric
+    g_gr = geom_graph["g"].detach()
+    aniso_field = torch.log(torch.clamp(g_gr[:, 0, 0], min=1e-8) / torch.clamp(g_gr[:, 1, 1], min=1e-8)).numpy()
+
+    return [curv_field, log_vol_field, aniso_field]
+
+grid_matrix = [[None for _ in range(4)] for _ in range(3)]
+test_acc_matrix = [[0.0 for _ in range(4)] for _ in range(3)]
+y_te_np = y_test.numpy()
+
+for col_idx, (_, mdl) in enumerate(exp_columns):
+    grid_fields = evaluate_final_layer_fields(mdl, grid_pts)
+    test_fields = evaluate_final_layer_fields(mdl, X_test)
+    for row_idx in range(3):
+        grid_matrix[row_idx][col_idx] = grid_fields[row_idx].reshape(xx.shape)
+        preds_pos = (test_fields[row_idx] > 0.0).astype(int)
+        test_acc_matrix[row_idx][col_idx] = float((preds_pos == y_te_np).mean() * 100.0)
+
+fig, axes = plt.subplots(3, 4, figsize=(17.5, 11.5), sharex=True, sharey=True)
+
+for row_idx in range(3):
+    for col_idx, (col_title, _) in enumerate(exp_columns):
+        ax = axes[row_idx, col_idx]
+        fld = grid_matrix[row_idx][col_idx]
+        vm = float(max(np.percentile(np.abs(fld), 96), 0.25))
+        levels = np.linspace(-vm, vm, 25)
+        norm = TwoSlopeNorm(vmin=-vm, vcenter=0.0, vmax=vm)
+
+        im = ax.contourf(xx, yy, fld, levels=levels, cmap="RdBu_r", norm=norm, extend="both")
+        if fld.min() < 0.0 < fld.max():
+            ax.contour(xx, yy, fld, levels=[0.0], colors="k", linewidths=1.8)
+
+        ax.scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", edgecolors="w", s=18, alpha=0.85)
+        ax.scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", edgecolors="w", s=18, alpha=0.85)
+
+        acc_val = test_acc_matrix[row_idx][col_idx]
+        is_target_pair = (row_idx == 0 and col_idx == 1) or (row_idx == 1 and col_idx == 2) or (row_idx == 2 and col_idx == 3)
+        tag = f"★ Target (Acc: {acc_val:.1f}%)" if is_target_pair else f"I[>0] Acc: {acc_val:.1f}%"
+
+        if row_idx == 0:
+            ax.set_title(f"{col_title}\\n({tag})", fontsize=10, fontweight="bold" if is_target_pair else "normal")
+        else:
+            ax.set_title(f"({tag})", fontsize=9.5, fontweight="bold" if is_target_pair else "normal")
+
+        if col_idx == 0:
+            ax.set_ylabel(f"{row_labels[row_idx]}\\n$x^2$", fontsize=10)
+        if row_idx == 2:
+            ax.set_xlabel("$x^1$", fontsize=10)
+
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+
+plt.suptitle(
+    "3x4 Matrix of Final-Layer (l=5) Geometric Fields Across Experiments (RdBu_r: Blue < 0, White = 0, Red > 0)",
+    y=1.01,
+    fontsize=13.5,
+)
+plt.tight_layout()
+plt.show()
+""",
+        },
     ]
     build_and_execute_notebook(ROOT / "notebooks" / "05_geometric_loss_ablations_and_synthesis.ipynb", cells)
 
