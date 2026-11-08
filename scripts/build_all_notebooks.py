@@ -349,7 +349,7 @@ print(f"  4. Layer 4 Penultimate Immersion in R^10        : mean |K| = {geom_l4_
             "type": "markdown",
             "source": r"""
 ## 2. Layerwise Gaussian Curvature Landscape $K^{(\ell)}(x)$ Across Network Depth
-We plot $\operatorname{arcsinh}(K^{(\ell)}(x))$ across layers $\ell = 1, 2, 3, 4$ (Euclidean immersion in $\mathbb{R}^{d_\ell}$) and layer $\ell = 5$ (Graph immersion in $\mathbb{R}^4$).
+We plot $\mathrm{arcsinh}(K^{(\ell)}(x))$ across layers $\ell = 1, 2, 3, 4$ (Euclidean immersion in $\mathbb{R}^{d_\ell}$) and layer $\ell = 5$ (Graph immersion in $\mathbb{R}^4$).
 Notice how **Brandon, Chadwick, & Pellegrino (2025)**'s two-stage geometric decomposition appears:
 - **Early expansion layers ($\ell = 1, 2, 3$)** introduce localized positive and negative curvature folds along the moon crescents to discretize continuous input coordinates.
 - **Contraction layers ($\ell = 4, 5$)** concentrate sharp curvature ridges along the decision boundary while flattening the interior of each class manifold (discrete Ricci flow smoothing; **Baptista et al., 2024**; **Hehl et al., 2025**).
@@ -688,7 +688,7 @@ print("Captured parameter manifold checkpoints at epochs:", list(snapshots.keys(
             "type": "markdown",
             "source": r"""
 ## 1. Co-Evolution of the $422 \times 422$ Parameter FIM Spectrum and $2 \times 2$ Data Information Matrix
-We compute the eigenspectrum of $F_{\mu\nu}(\theta)$ and the spatial trace of $\mathrm{DIM}_{ij}(x; \theta)$ across training checkpoints. Notice how the parameter manifold concentrates its Fisher information into a low-dimensional stiff subspace while $\operatorname{Tr}(\mathrm{DIM}(x; \theta))$ sharpens into a singular foliation along the decision boundary (**Tron et al., 2024**).
+We compute the eigenspectrum of $F_{\mu\nu}(\theta)$ and the spatial trace of $\mathrm{DIM}_{ij}(x; \theta)$ across training checkpoints. Notice how the parameter manifold concentrates its Fisher information into a low-dimensional stiff subspace while $\mathrm{Tr}(\mathrm{DIM}(x; \theta))$ sharpens into a singular foliation along the decision boundary (**Tron et al., 2024**).
 """,
         },
         {
@@ -1649,7 +1649,7 @@ plt.show()
 
 Finally, we evaluate **all three differential-geometric measures** at the final layer ($\ell = 5$) across **all four trained networks** in the 2D input space $(x^1, x^2)$:
 - **Rows (Geometric Measures at Layer $\ell = 5$)**:
-  1. **Row 1 — Gaussian Curvature**: $\operatorname{arcsinh}\!\big(K^{(5)}(x)\big)$ (Graph metric $\tilde{g}^{(5)} = I_2 + (J^{(5)})^T J^{(5)}$; $0 = \text{flat}$).
+  1. **Row 1 — Gaussian Curvature**: $\mathrm{arcsinh}\!\big(K^{(5)}(x)\big)$ (Graph metric $\tilde{g}^{(5)} = I_2 + (J^{(5)})^T J^{(5)}$; $0 = \text{flat}$).
   2. **Row 2 — Log Volume Density**: $\log\sqrt{\det g^{(5)}(x)}$ (Euclidean pullback $g^{(5)} = (J^{(5)})^T J^{(5)}$; $0 = \text{equiareal}$).
   3. **Row 3 — Metric Anisotropy**: $\log\!\big(g^{(5)}_{11}(x) / g^{(5)}_{22}(x)\big)$ (Directional metric ratio; $0 = \text{isotropic } g_{11}=g_{22}$).
 - **Columns (Training Experiments)**:

@@ -31,7 +31,7 @@ Training the `[2 -> 5 -> 10 -> 15 -> 10 -> 2]` MLP from scratch using purely geo
 ---
 
 ### 2. $3 \times 4$ Cross-Evaluation Matrix of Final-Layer Geometric Fields Across Experiments
-Evaluating all three geometric invariants at the final layer ($\ell = 5$)—**Gaussian Curvature** $\operatorname{arcsinh}(K^{(5)}(x))$, **Log Volume Density** $\log\sqrt{\det g^{(5)}(x)}$, and **Metric Anisotropy** $\log(g^{(5)}_{11}(x)/g^{(5)}_{22}(x))$—across all four trained networks (`RdBu_r` centered at $0.0 = \text{white}$) reveals how each geometric loss selectively sculpts its target geometric field to separate Class $0$ (blue, $< 0$) from Class $1$ (red, $> 0$) along the zero contour (black):
+Evaluating all three geometric invariants at the final layer ($\ell = 5$)—**Gaussian Curvature** $\mathrm{arcsinh}(K^{(5)}(x))$, **Log Volume Density** $\log\sqrt{\det g^{(5)}(x)}$, and **Metric Anisotropy** $\log(g^{(5)}_{11}(x)/g^{(5)}_{22}(x))$—across all four trained networks (`RdBu_r` centered at $0.0 = \text{white}$) reveals how each geometric loss selectively sculpts its target geometric field to separate Class $0$ (blue, $< 0$) from Class $1$ (red, $> 0$) along the zero contour (black):
 
 ![3x4 Matrix of Final-Layer Geometric Fields Across Experiments](assets/geometric_fields_matrix_3x4.png)
 
