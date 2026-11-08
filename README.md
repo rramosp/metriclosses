@@ -28,16 +28,14 @@ Training the `[2 -> 5 -> 10 -> 15 -> 10 -> 2]` MLP from scratch using purely geo
 
 ![Decision Landscapes Across Coordinate vs. Purely Differential-Geometric Objectives](assets/decision_landscapes.png)
 
-When trained with the **Gaussian Curvature Margin Loss**, the network physically bends the 2D representation manifold into a **hyperbolic saddle ($K < 0$, blue)** over Class $0$ and an **elliptic dome ($K > 0$, red)** over Class $1$, separated by a zero-curvature contour $K(x) = 0$:
-
-![3D Immersed Data Manifold Coloured by Gaussian Curvature](assets/curvature_3d_surface.png)
-
 ---
 
-### 2. Layerwise Pullback Metric Volume Magnification & Anisotropy
-Across depth $\ell = 1 \to 5$, feature learning breaks initialization symmetry and concentrates local volume expansion $\sqrt{\det g^{(\ell)}(x)}$ and spectral condition number $\lambda_1(g^{(\ell)})/\lambda_2(g^{(\ell)})$ along the nonlinear decision boundary between the two moons:
+### 2. Layerwise Pullback Metric, Volume, Anisotropy & Curvature (Cross-Entropy Baseline)
+When trained with standard **Cross-Entropy loss**, the `[2 -> 5 -> 10 -> 15 -> 10 -> 2]` MLP progressively warps the pullback metric tensor $g^{(\ell)}_{ij}(x)$ and Gaussian curvature $K^{(\ell)}(x)$ across depth $\ell = 1 \to 5$. Feature learning breaks initialization symmetry and concentrates local volume expansion $\sqrt{\det g^{(\ell)}(x)}$, spectral condition number $\lambda_1(g^{(\ell)})/\lambda_2(g^{(\ell)})$, and sharp curvature ridges along the nonlinear decision boundary between the two moons:
 
 ![Layerwise Pullback Metric Volume Element and Anisotropy Across Depth](assets/layerwise_pullback_metrics.png)
+
+![Layerwise Gaussian Curvature Landscape Across Depth](assets/layerwise_curvature_landscape.png)
 
 | Layer $\ell$ | Transformation | Width $d_\ell$ | Median Volume $\sqrt{\det g^{(\ell)}}$ | Max Volume $\sqrt{\det g^{(\ell)}}$ | Median Anisotropy $\lambda_1 / \lambda_2$ |
 | :---: | :--- | :---: | :---: | :---: | :---: |
@@ -83,8 +81,8 @@ diffgeom/
 │   └── build_all_notebooks.py                                # Rebuilds and executes all 5 notebooks end-to-end
 └── assets/
     ├── decision_landscapes.png                               # 4-panel comparison of learned geometric decision boundaries
-    ├── curvature_3d_surface.png                              # 3D saddle (K < 0) vs. dome (K > 0) learned output manifold
-    ├── layerwise_pullback_metrics.png                        # 10-panel layerwise volume & anisotropy heatmaps across L1..L5
+    ├── layerwise_pullback_metrics.png                        # 10-panel layerwise volume & anisotropy heatmaps across L1..L5 (CE baseline)
+    ├── layerwise_curvature_landscape.png                     # 5-panel layerwise Gaussian curvature heatmaps across L1..L5 (CE baseline)
     └── compute_memory_benchmark.png                          # 3-panel latency, memory, and autograd node scaling chart
 ```
 

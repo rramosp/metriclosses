@@ -437,6 +437,189 @@ plt.tight_layout()
 plt.show()
 """,
         },
+        {
+            "type": "markdown",
+            "source": r"""
+## 4. Layerwise Log Volume Landscape Across Network Depth
+
+Alongside curvature $K^{(\ell)}(x)$, the pullback metric $g^{(\ell)}_{ij}(x; \theta)$ defines the **local Riemannian log-volume density**:
+$$\log \rho_{\text{vol}}^{(\ell)}(x; \theta) = \log\sqrt{\det g^{(\ell)}(x; \theta)} = \frac{1}{2}\log \det g^{(\ell)}(x; \theta)$$
+where $\log\sqrt{\det g^{(\ell)}(x)} > 0$ indicates local area expansion, $\log\sqrt{\det g^{(\ell)}(x)} < 0$ indicates local area contraction, and $\log\sqrt{\det g^{(\ell)}(x)} = 0$ is the equiareal contour ($\det g^{(\ell)} = 1$).
+
+Below we visualize:
+1. The 2D spatial landscape of $\log\sqrt{\det g^{(\ell)}(x)}$ across all five layers $\ell \in \{1, 2, 3, 4, 5\}$.
+2. The evolution of $\mathbb{E}[\log\sqrt{\det g^{(\ell)}(x)}]$ across layers $\ell = 1 \to 5$ and training epochs $t \in \{0, 20, 70, 200\}$, contrasting class interior points against the decision boundary and comparing Class $0$ vs. Class $1$.
+""",
+        },
+        {
+            "type": "code",
+            "source": """
+from src.geometry import compute_layer_pullback_metric, compute_metric_spectrum
+
+fig, axes = plt.subplots(1, 5, figsize=(17.5, 3.7), sharex=True, sharey=True)
+print(f"{'Layer':<10} {'Width':<8} {'Min log Vol':>14} {'Mean log Vol':>14} {'Max log Vol':>14} {'Boundary Mean':>15}")
+print("-" * 80)
+
+for idx, l_idx in enumerate(layers_list):
+    g_grid = compute_layer_pullback_metric(model, grid_pts, layer_idx=l_idx, metric_mode="euclidean", eps=1e-7)
+    log_vol_grid = (0.5 * torch.log(torch.clamp(torch.linalg.det(g_grid), min=1e-12))).detach().numpy().reshape(xx.shape)
+    vmax_v = max(np.percentile(np.abs(log_vol_grid), 96), 0.2)
+
+    g_tr_l = compute_layer_pullback_metric(model, X_train, layer_idx=l_idx, metric_mode="euclidean", eps=1e-7)
+    log_vol_tr = (0.5 * torch.log(torch.clamp(torch.linalg.det(g_tr_l), min=1e-12))).detach()
+    bnd_mean = log_vol_tr[boundary_mask].mean().item() if boundary_mask.any() else log_vol_tr.mean().item()
+
+    print(
+        f"Layer {l_idx:<4d} d={model.layer_dims[l_idx]:<6d} "
+        f"{log_vol_grid.min():14.3f} {log_vol_grid.mean():14.3f} {log_vol_grid.max():14.3f} {bnd_mean:15.3f}"
+    )
+
+    im = axes[idx].contourf(xx, yy, log_vol_grid, levels=22, cmap="RdBu_r", vmin=-vmax_v, vmax=vmax_v)
+    axes[idx].contour(xx, yy, log_vol_grid, levels=[0.0], colors="gold", linewidths=1.2, linestyles=":")
+    axes[idx].contour(xx, yy, probs_grid, levels=[0.5], colors="k", linewidths=1.5, linestyles="--")
+    axes[idx].scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", s=8, alpha=0.4)
+    axes[idx].scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", s=8, alpha=0.4)
+    axes[idx].set_title(f"Layer {l_idx} (d={model.layer_dims[l_idx]})\\n$\\log\\sqrt{{\\det g^{{({l_idx})}}(x)}}$")
+    axes[idx].set_xlabel("$x^1$")
+    plt.colorbar(im, ax=axes[idx], fraction=0.046)
+
+axes[0].set_ylabel("$x^2$")
+plt.suptitle("Layerwise Log Volume Density Landscape Across the [2 -> 5 -> 10 -> 15 -> 10 -> 2] MLP", y=1.04, fontsize=13)
+plt.tight_layout()
+plt.show()
+
+# Track Log-Volume evolution across training epochs (Interior vs Boundary & Class 0 vs Class 1)
+fig, axes = plt.subplots(1, 2, figsize=(12.8, 4.3))
+for ep, col in zip(epochs_list, colors):
+    probe.load_state_dict(epoch_snapshots[ep])
+    lv_int, lv_bnd, lv_c0, lv_c1 = [], [], [], []
+    for l_idx in layers_list:
+        g_ep = compute_layer_pullback_metric(probe, X_train, layer_idx=l_idx, metric_mode="euclidean", eps=1e-7)
+        lv = (0.5 * torch.log(torch.clamp(torch.linalg.det(g_ep), min=1e-12))).detach()
+        lv_int.append(lv[interior_mask].mean().item())
+        lv_bnd.append(lv[boundary_mask].mean().item() if boundary_mask.any() else lv.mean().item())
+        lv_c0.append(lv[y_train == 0].mean().item())
+        lv_c1.append(lv[y_train == 1].mean().item())
+
+    axes[0].plot(layers_list, lv_int, "o-", lw=2, color=col, label=f"Epoch {ep} (Interior)")
+    axes[0].plot(layers_list, lv_bnd, "s--", lw=1.8, color=col, label=f"Epoch {ep} (Boundary)")
+    axes[1].plot(layers_list, lv_c1, "o-", lw=2, color=col, label=f"Epoch {ep} (Class 1)")
+    axes[1].plot(layers_list, lv_c0, "s--", lw=1.8, color=col, label=f"Epoch {ep} (Class 0)")
+
+for ax in axes:
+    ax.axhline(0.0, color="k", lw=1.0, ls=":")
+    ax.set_xticks(layers_list)
+    ax.set_xticklabels([f"L{l} (d={model.layer_dims[l]})" for l in layers_list])
+    ax.grid(alpha=0.3)
+
+axes[0].set_ylabel("Mean Log Volume $\\mathbb{E}[\\log\\sqrt{\\det g^{(\\ell)}(x)}]$")
+axes[0].set_title("Log-Volume Evolution: Class Interior vs. Decision Boundary")
+axes[0].legend(fontsize=8, ncol=2)
+
+axes[1].set_ylabel("Mean Log Volume $\\mathbb{E}[\\log\\sqrt{\\det g^{(\\ell)}(x)}]$")
+axes[1].set_title("Log-Volume Evolution: Class 1 (Solid) vs. Class 0 (Dashed)")
+axes[1].legend(fontsize=8, ncol=2)
+
+plt.tight_layout()
+plt.show()
+""",
+        },
+        {
+            "type": "markdown",
+            "source": r"""
+## 5. Layerwise Metric Anisotropy Landscape Across Network Depth
+
+To capture how each layer stretches space directionally (beyond isotropic area change), we examine two **metric anisotropy fields** across layers $\ell \in \{1, 2, 3, 4, 5\}$:
+1. **Directional Metric Polarization**: $\log\!\big(g^{(\ell)}_{11}(x) / g^{(\ell)}_{22}(x)\big)$, measuring horizontal ($x^1$) versus vertical ($x^2$) metric dilation.
+2. **Coordinate-Invariant Spectral Anisotropy**: $\log_{10}\!\big(\lambda_1(g^{(\ell)}(x)) / \lambda_2(g^{(\ell)}(x))\big)$, measuring the condition number (ratio of principal eigenvalues) of $g^{(\ell)}(x)$ and quantifying the formation of 1D singular foliation leaves (**Benfenati & Marta, 2023**).
+""",
+        },
+        {
+            "type": "code",
+            "source": """
+fig, axes = plt.subplots(2, 5, figsize=(17.5, 6.8), sharex=True, sharey=True)
+print(f"{'Layer':<10} {'Width':<8} {'Mean log(g11/g22)':>18} {'Mean log10(l1/l2)':>18} {'Boundary log10(l1/l2)':>22}")
+print("-" * 80)
+
+for idx, l_idx in enumerate(layers_list):
+    g_grid_graph = compute_layer_pullback_metric(model, grid_pts, layer_idx=l_idx, metric_mode="graph")
+    dir_aniso_grid = torch.log(g_grid_graph[:, 0, 0] / g_grid_graph[:, 1, 1]).detach().numpy().reshape(xx.shape)
+    vmax_a = max(np.percentile(np.abs(dir_aniso_grid), 96), 0.15)
+
+    g_grid_eucl = compute_layer_pullback_metric(model, grid_pts, layer_idx=l_idx, metric_mode="euclidean", eps=1e-7)
+    _, _, cond_grid = compute_metric_spectrum(g_grid_eucl)
+    spec_aniso_grid = torch.log10(torch.clamp(cond_grid, min=1.0)).detach().numpy().reshape(xx.shape)
+
+    g_tr_eucl = compute_layer_pullback_metric(model, X_train, layer_idx=l_idx, metric_mode="euclidean", eps=1e-7)
+    _, _, cond_tr = compute_metric_spectrum(g_tr_eucl)
+    log_cond_tr = torch.log10(torch.clamp(cond_tr, min=1.0)).detach()
+    bnd_cond = log_cond_tr[boundary_mask].mean().item() if boundary_mask.any() else log_cond_tr.mean().item()
+
+    print(
+        f"Layer {l_idx:<4d} d={model.layer_dims[l_idx]:<6d} "
+        f"{dir_aniso_grid.mean():+18.3f} {spec_aniso_grid.mean():18.3f} {bnd_cond:22.3f}"
+    )
+
+    # Row 0: Directional polarization log(g11 / g22)
+    im0 = axes[0, idx].contourf(xx, yy, dir_aniso_grid, levels=22, cmap="PuOr_r", vmin=-vmax_a, vmax=vmax_a)
+    axes[0, idx].contour(xx, yy, probs_grid, levels=[0.5], colors="k", linewidths=1.4, linestyles="--")
+    axes[0, idx].scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", s=8, alpha=0.35)
+    axes[0, idx].scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", s=8, alpha=0.35)
+    axes[0, idx].set_title(f"Layer {l_idx} (d={model.layer_dims[l_idx]})\\n$\\log(g^{{({l_idx})}}_{{11}} / g^{{({l_idx})}}_{{22}})$")
+    plt.colorbar(im0, ax=axes[0, idx], fraction=0.046)
+
+    # Row 1: Spectral condition number log10(lambda_1 / lambda_2)
+    im1 = axes[1, idx].contourf(xx, yy, spec_aniso_grid, levels=22, cmap="viridis")
+    axes[1, idx].contour(xx, yy, probs_grid, levels=[0.5], colors="white", linewidths=1.4, linestyles="--")
+    axes[1, idx].set_title(f"Spectral $\\log_{{10}}(\\lambda_1^{{({l_idx})}} / \\lambda_2^{{({l_idx})}})$")
+    axes[1, idx].set_xlabel("$x^1$")
+    plt.colorbar(im1, ax=axes[1, idx], fraction=0.046)
+
+axes[0, 0].set_ylabel("$x^2$")
+axes[1, 0].set_ylabel("$x^2$")
+plt.suptitle("Layerwise Directional Polarization and Spectral Anisotropy Landscapes Across Depth", y=1.02, fontsize=13)
+plt.tight_layout()
+plt.show()
+
+# Track Spectral and Directional Anisotropy across training epochs
+fig, axes = plt.subplots(1, 2, figsize=(12.8, 4.3))
+for ep, col in zip(epochs_list, colors):
+    probe.load_state_dict(epoch_snapshots[ep])
+    spec_int, spec_bnd, dir_gap = [], [], []
+    for l_idx in layers_list:
+        g_ep_eucl = compute_layer_pullback_metric(probe, X_train, layer_idx=l_idx, metric_mode="euclidean", eps=1e-7)
+        _, _, cond_ep = compute_metric_spectrum(g_ep_eucl)
+        lc = torch.log10(torch.clamp(cond_ep, min=1.0)).detach()
+        spec_int.append(lc[interior_mask].mean().item())
+        spec_bnd.append(lc[boundary_mask].mean().item() if boundary_mask.any() else lc.mean().item())
+
+        g_ep_graph = compute_layer_pullback_metric(probe, X_train, layer_idx=l_idx, metric_mode="graph").detach()
+        lr = torch.log(g_ep_graph[:, 0, 0] / g_ep_graph[:, 1, 1])
+        dir_gap.append((lr[y_train == 1].mean() - lr[y_train == 0].mean()).item())
+
+    axes[0].plot(layers_list, spec_int, "o-", lw=2, color=col, label=f"Epoch {ep} (Interior)")
+    axes[0].plot(layers_list, spec_bnd, "s--", lw=1.8, color=col, label=f"Epoch {ep} (Boundary)")
+    axes[1].plot(layers_list, dir_gap, "o-", lw=2, color=col, label=f"Epoch {ep}")
+
+axes[0].set_xticks(layers_list)
+axes[0].set_xticklabels([f"L{l} (d={model.layer_dims[l]})" for l in layers_list])
+axes[0].set_ylabel("Mean Spectral Anisotropy $\\mathbb{E}[\\log_{10}(\\lambda_1^{(\\ell)} / \\lambda_2^{(\\ell)})]$")
+axes[0].set_title("Spectral Anisotropy Evolution: Interior vs. Boundary")
+axes[0].legend(fontsize=8, ncol=2)
+axes[0].grid(alpha=0.3)
+
+axes[1].axhline(0.0, color="k", lw=1.0, ls=":")
+axes[1].set_xticks(layers_list)
+axes[1].set_xticklabels([f"L{l} (d={model.layer_dims[l]})" for l in layers_list])
+axes[1].set_ylabel("Directional Polarization Gap $\\Delta \\log(g^{(\\ell)}_{11} / g^{(\\ell)}_{22})$")
+axes[1].set_title("Class Directional Anisotropy Separation Across Training Epochs")
+axes[1].legend(fontsize=8.5)
+axes[1].grid(alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+""",
+        },
     ]
     build_and_execute_notebook(ROOT / "notebooks" / "02_layerwise_curvature_evolution.ipynb", cells)
 
