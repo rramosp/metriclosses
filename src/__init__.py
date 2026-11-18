@@ -25,7 +25,9 @@ from .geometry import (
     curvature_margin_loss,
     flatten_params,
     get_moons_dataset,
+    get_synthetic_dataset,
     make_evaluation_grid,
+    scalar_geometric_predict,
     volume_contrastive_loss,
     woodbury_coupled_ngd_direction,
 )
@@ -33,7 +35,9 @@ from .geometry import (
 __all__ = [
     "MoonsMLP",
     "get_moons_dataset",
+    "get_synthetic_dataset",
     "make_evaluation_grid",
+    "scalar_geometric_predict",
     "compute_layer_jacobian",
     "compute_layer_pullback_metric",
     "compute_volume_element",

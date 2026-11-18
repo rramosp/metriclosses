@@ -411,3 +411,99 @@ This is an **ordinary differential equation (a coupled geometric flow)**, direct
 
 #### 3. What *Would* Be Truly Circular?
 It would only be circular if computing $g_{ij}(x; \theta_t)$ **at the same step $t$** required already knowing $G^\Theta_{\mu\nu}(\theta_t)$ (a simultaneous algebraic fixed-point system $g_t = \mathcal{F}(G^\Theta_t)$ and $G^\Theta_t = \mathcal{H}(g_t)$). Because $g_{ij}(x; \theta_t)$ is pulled back from the fixed ambient output metric rather than from $G^\Theta_t$, the base of the hierarchy is grounded at every step.
+
+---
+
+## Turn 11
+
+### User
+if it were truly circular, what would it imply for the optimization process (training)?
+
+### Assistant
+If the two metrics were **truly circular at the same instant $t$**—meaning $g(x; \theta)$ depended on $G^\Theta(\theta)$ and $G^\Theta(\theta)$ simultaneously depended on $g(x; \theta)$ without an external Euclidean output ruler—for example via the mixed spatio-parametric sensitivity tensor $M_{i\mu}(x; \theta) = \frac{\partial^2 z}{\partial x^i \partial \theta^\mu}$ ([spec.md](spec.md)):
+$$g(x) = \mathcal{F}_\theta(G^\Theta)(x) = M(x)\,(G^\Theta)^{-1} M(x)^T, \qquad G^\Theta = \mathcal{H}_\theta(g) = \mathbb{E}_{x \sim \mathcal{D}}\!\left[M(x)^T\, g(x)^{-1} M(x)\right]$$
+then training would fundamentally change from **standard feedforward optimization** into **self-consistent equilibrium (bilevel) optimization**, with five concrete consequences:
+
+---
+
+#### 1. Every Forward Pass Would Require an Inner Fixed-Point Solver
+* You could no longer evaluate the geometric loss $\mathcal{L}_{\mathrm{geom}}(\theta_t)$ in one pass, because $g^*(x; \theta_t)$ is only defined implicitly as a fixed point $g^* = (\mathcal{F}_{\theta_t} \circ \mathcal{H}_{\theta_t})(g^*)$.
+* Just **computing the loss** at step $t$ would require running an inner alternating Sinkhorn / matrix-scaling loop $g^{(k+1)} = \mathcal{F}_{\theta_t}(\mathcal{H}_{\theta_t}(g^{(k)}))$ until convergence $\|g^{(k+1)} - g^{(k)}\| < \varepsilon$—analogous to **Deep Equilibrium Models (DEQs)** or **Hartree–Fock self-consistent field** iterations in quantum physics.
+
+#### 2. Backpropagation Would Require Implicit Differentiation (IFT), Not Standard Autograd
+* Unrolling $K_{\mathrm{inner}}$ matrix-inversion iterations inside PyTorch autograd would multiply memory and graph size by $K_{\mathrm{inner}}\times$ and suffer from vanishing/exploding gradients through repeated inversions.
+* Instead, `loss.backward()` would have to use the **Implicit Function Theorem (IFT)** at the converged equilibrium $g^* = \mathcal{T}_\theta(g^*)$, solving a linear **adjoint system**:
+  $$\left(I - \frac{\partial \mathcal{T}_\theta}{\partial g^*}\right)^T \lambda = \frac{\partial \mathcal{L}_{\mathrm{geom}}}{\partial g^*}, \qquad \nabla_\theta \mathcal{L} = \frac{\partial \mathcal{L}_{\mathrm{geom}}}{\partial \theta} + \left(\frac{\partial \mathcal{T}_\theta}{\partial \theta}\right)^T \lambda$$
+  This restores $O(1)$ memory with respect to inner iterations, but requires a linear solver (e.g., Conjugate Gradient or Neumann series) on every backward pass.
+
+#### 3. Global Scale Indeterminacy (Runaway Dilation Without Gauge Fixing)
+* Without an external ambient ruler ($I_2$ in [src/geometry.py](src/geometry.py)) to set the unit of length, any mutually inverse system has a **projective scale gauge symmetry**: if $(g^*, G^{\Theta*})$ is a solution, then $(\alpha^{-1} g^*, \alpha\, G^{\Theta*})$ is *also* an exact solution for **every** $\alpha > 0$.
+* **Training consequence**: Unless you explicitly enforce a normalization constraint at every step (such as $\mathrm{Tr}(G^\Theta) = P$ or $\mathbb{E}_x[\det g(x)] = 1$, as in Tyler's M-estimator / operator Sinkhorn scaling), the inner loop drifts toward $0$ or $\infty$, and absolute volume thresholds ($\det g = 1$) become undefined—only *relative* volume ratios $\det g(x_i) / \det g(x_j)$ remain meaningful.
+
+#### 4. Phase Transitions & Bifurcation Cliffs in the Loss Landscape
+* When $\mathcal{T}_\theta = \mathcal{F}_\theta \circ \mathcal{H}_\theta$ is a contraction ($\rho(\partial_g \mathcal{T}_\theta) < 1$), the fixed point $g^*(\theta)$ is unique and smooth in $\theta$.
+* However, if the network enters a weight region where Jacobian ranks drop (singular foliations) and $\rho(\partial_g \mathcal{T}_\theta) \to 1$, the Jacobian $(I - \partial_g \mathcal{T}_\theta)$ becomes singular: the fixed point can **fail to exist** or **bifurcate** into multiple competing geometries for the same weights $\theta$, creating discontinuous jumps ("metric cliffs") and exploding implicit gradients during training.
+
+#### 5. Practical Workaround: Two-Timescale Adiabatic Co-Evolution
+* In practice, you would avoid solving the inner fixed point to completion at every step by turning the circularity into a **two-timescale dynamical system**—maintaining persistent running estimates $(g_t, G^\Theta_t)$ that update faster than the weights ($\eta \ll \beta_g, \beta_G$):
+  $$\begin{aligned}
+  g_{t+1} &= \mathrm{Normalize}\!\Big((1 - \beta_g)\,g_t + \beta_g\,\mathcal{F}_{\theta_t}(G^\Theta_t)\Big) \\
+  G^\Theta_{t+1} &= (1 - \beta_G)\,G^\Theta_t + \beta_G\,\mathcal{H}_{\theta_t}(g_{t+1}) \\
+  \theta_{t+1} &= \theta_t - \eta\,(G^\Theta_{t+1} + \lambda I)^{-1} \nabla_\theta \mathcal{L}_{\mathrm{geom}}(\theta_t; g_{t+1})
+  \end{aligned}$$
+* By Borkar's two-timescale stochastic approximation principle, $(g_t, G^\Theta_t)$ adiabatically tracks the self-consistent equilibrium $(g^*(\theta_t), G^{\Theta*}(\theta_t))$ at **$O(1)$ per-step cost**—giving **complete background independence** (no arbitrary choice of ambient Euclidean vs. Graph metric on the output space) without needing an inner loop.
+
+
+---
+
+## Turn 12
+
+### User
+update the notebooks so that, at the beginning of each notebook the user can set:
+
+1- what is the toy dataset to use (from scikit learn synthetic datasets)  and with what parameters (noise, number of classes, etc.) ... number of classes should default to 2
+2- a sequence of integers specifying the number of layers and number of neurons per layer for the neural network
+3- the activation function for the hidden layers, and for the output layer
+
+### Assistant
+All seven notebooks and the supporting differential geometry library in [src/geometry.py](src/geometry.py) have been updated, regenerated, and verified.
+
+#### 1. Top-of-Notebook `# USER CONFIGURATION` Block Across All 7 Notebooks
+At the very top of Code Cell 1 in every notebook:
+- [notebooks/01_baseline_and_pullback_metrics.ipynb](notebooks/01_baseline_and_pullback_metrics.ipynb)
+- [notebooks/02_layerwise_curvature_evolution.ipynb](notebooks/02_layerwise_curvature_evolution.ipynb)
+- [notebooks/03_parameter_data_manifold_duality.ipynb](notebooks/03_parameter_data_manifold_duality.ipynb)
+- [notebooks/04_purely_geometric_curvature_losses.ipynb](notebooks/04_purely_geometric_curvature_losses.ipynb)
+- [notebooks/05_geometric_loss_ablations_and_synthesis.ipynb](notebooks/05_geometric_loss_ablations_and_synthesis.ipynb)
+- [notebooks/06-coupled-optimization.ipynb](notebooks/06-coupled-optimization.ipynb)
+- [notebooks/07-evaluating-efficient-training.ipynb](notebooks/07-evaluating-efficient-training.ipynb)
+
+users can now configure:
+```python
+# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
+#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
+DATASET_NAME = "moons"
+N_CLASSES = 2                  # Number of classes (defaults to 2)
+DATASET_PARAMS = {
+    "n_train": 400,
+    "n_test": 200,
+    "noise": 0.10,             # Noise std (or flip_y for "classification")
+    "seed": 42,
+    # Optional dataset-specific parameters: e.g. factor=0.5 ("circles"),
+    # cluster_std=0.65 ("blobs"), class_sep=1.25 ("classification")
+}
+
+# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
+LAYER_DIMS = [2, 5, 10, 15, 10, 2]
+
+# 3. Activation Functions for Hidden Layers and Output Layer
+#    Options: "tanh", "gelu", "silu", "softplus", "elu", "sigmoid", "sin", "relu", "identity"
+HIDDEN_ACTIVATION = "tanh"
+OUTPUT_ACTIVATION = "identity"
+```
+
+#### 2. Supporting Library & Downstream Dynamic Adaptations ([src/geometry.py](src/geometry.py), [scripts/build_all_notebooks.py](scripts/build_all_notebooks.py))
+- **Configurable `scikit-learn` Synthetic Datasets (`get_synthetic_dataset`)**: Supports `"moons"`, `"circles"`, `"blobs"`, `"classification"`, and `"gaussian_quantiles"`, defaulting `n_classes = 2` (with multi-class support for $C \ge 2$, including shifted/rotated crescents and concentric rings when `n_classes > 2` on `"moons"` or `"circles"`) plus generator-specific keyword parameters (`factor`, `cluster_std`, `class_sep`, `cov`).
+- **Dynamic Layer Depth & Widths (`LAYER_DIMS`)**: Replaced hardcoded layer counts (`5`), parameter counts (`422`), and subplot grids across all 7 notebooks with dynamic queries (`model.num_layers`, `P_total`, and `CE_LAYER_DIMS = [*LAYER_DIMS[:-1], max(LAYER_DIMS[-1], N_CLASSES)]` for Cross-Entropy baselines when `N_CLASSES > LAYER_DIMS[-1]`).
+- **Separate Hidden & Output Activations (`HIDDEN_ACTIVATION`, `OUTPUT_ACTIVATION`)**: Extended `MoonsMLP` and `_make_single_point_layer_fn` with `output_activation` (`"identity"`, `"tanh"`, `"gelu"`, `"silu"`, `"softplus"`, `"elu"`, `"sigmoid"`, `"sin"`, `"softmax"`, `"log_softmax"`, `"relu"`), ensuring exact consistency between `model.forward` and `torch.func` pullback metric/curvature operators.
+- **Multi-Class Generalization**: Generalized `compute_parameter_fim`, `compute_data_information_matrix`, `curvature_margin_loss`, `volume_contrastive_loss`, `anisotropy_margin_loss`, `scalar_geometric_predict`, `compute_coupled_geometric_metric`, and `woodbury_coupled_ngd_direction` to arbitrary `N_CLASSES >= 2` while preserving exact numerical equivalence for default `N_CLASSES = 2`.

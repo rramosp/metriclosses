@@ -9,10 +9,16 @@ loss functions) using composable PyTorch automatic differentiation (torch.func).
 from __future__ import annotations
 
 import math
-from typing import Callable, Dict, List, Literal, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
-from sklearn.datasets import make_moons
+from sklearn.datasets import (
+    make_blobs,
+    make_circles,
+    make_classification,
+    make_gaussian_quantiles,
+    make_moons,
+)
 from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
@@ -23,16 +29,129 @@ MetricMode = Literal["euclidean", "graph", "conformal_gaussian"]
 GeometricTask = Literal["curvature", "volume", "anisotropy"]
 
 
-def get_moons_dataset(
+def get_synthetic_dataset(
+    dataset_name: str = "moons",
     n_train: int = 600,
     n_test: int = 300,
+    n_classes: int = 2,
     noise: float = 0.10,
+    input_dim: int = 2,
     seed: int = 42,
     dtype: torch.dtype = torch.float64,
     device: str | torch.device = "cpu",
+    **dataset_kwargs: Any,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Generate standardized make_moons train and test datasets."""
-    X, y = make_moons(n_samples=n_train + n_test, noise=noise, random_state=seed)
+    """Generate standardized train/test splits from scikit-learn synthetic classification datasets.
+
+    Supported dataset_name values:
+      - 'moons' / 'make_moons'
+      - 'circles' / 'make_circles'
+      - 'blobs' / 'make_blobs'
+      - 'classification' / 'make_classification'
+      - 'gaussian_quantiles' / 'make_gaussian_quantiles'
+    """
+    if n_classes < 2:
+        raise ValueError(f"n_classes must be >= 2, got {n_classes}")
+
+    n_total = n_train + n_test
+    key = dataset_name.lower().strip()
+    if key.startswith("make_"):
+        key = key[len("make_") :]
+
+    rng = np.random.RandomState(seed)
+
+    if key == "moons":
+        if n_classes == 2 and input_dim == 2:
+            X, y = make_moons(n_samples=n_total, noise=noise, random_state=seed)
+        else:
+            # Generalized multi-class crescents using make_moons building blocks
+            per_pair = int(math.ceil(n_total / n_classes))
+            xs, ys = [], []
+            for c in range(n_classes):
+                x_pair, y_pair = make_moons(n_samples=2 * per_pair, noise=noise, random_state=seed + c)
+                x_c = x_pair[y_pair == (c % 2)][:per_pair].copy()
+                angle = 2.0 * math.pi * c / n_classes
+                shift = np.array([1.35 * math.cos(angle), 1.35 * math.sin(angle)])
+                x_c = x_c + shift
+                if input_dim > 2:
+                    pad = rng.normal(scale=max(noise, 1e-3), size=(len(x_c), input_dim - 2))
+                    x_c = np.hstack([x_c, pad])
+                xs.append(x_c)
+                ys.append(np.full(len(x_c), c, dtype=np.int64))
+            X = np.vstack(xs)[:n_total]
+            y = np.concatenate(ys)[:n_total]
+    elif key == "circles":
+        factor = float(dataset_kwargs.get("factor", 0.5))
+        if n_classes == 2 and input_dim == 2:
+            X, y = make_circles(n_samples=n_total, noise=noise, factor=factor, random_state=seed)
+        else:
+            radii = np.linspace(max(factor, 0.25), 1.0 + 0.45 * (n_classes - 2), n_classes)
+            counts = [n_total // n_classes + (1 if i < (n_total % n_classes) else 0) for i in range(n_classes)]
+            xs, ys = [], []
+            for c, (r_c, cnt) in enumerate(zip(radii, counts)):
+                theta_c = rng.uniform(0.0, 2.0 * math.pi, size=cnt)
+                pts = np.stack([r_c * np.cos(theta_c), r_c * np.sin(theta_c)], axis=-1)
+                if noise > 0.0:
+                    pts = pts + rng.normal(scale=noise, size=pts.shape)
+                if input_dim > 2:
+                    pts = np.hstack([pts, rng.normal(scale=max(noise, 1e-3), size=(cnt, input_dim - 2))])
+                xs.append(pts)
+                ys.append(np.full(cnt, c, dtype=np.int64))
+            X = np.vstack(xs)
+            y = np.concatenate(ys)
+    elif key == "blobs":
+        cluster_std = float(dataset_kwargs.get("cluster_std", max(noise * 6.0, 0.20)))
+        centers = dataset_kwargs.get("centers", n_classes)
+        center_box = dataset_kwargs.get("center_box", (-3.0, 3.0))
+        X, y = make_blobs(
+            n_samples=n_total,
+            n_features=input_dim,
+            centers=centers,
+            cluster_std=cluster_std,
+            center_box=center_box,
+            random_state=seed,
+        )
+    elif key == "classification":
+        n_informative = int(dataset_kwargs.get("n_informative", input_dim))
+        n_redundant = int(dataset_kwargs.get("n_redundant", 0))
+        n_repeated = int(dataset_kwargs.get("n_repeated", 0))
+        n_clusters_per_class = int(
+            dataset_kwargs.get(
+                "n_clusters_per_class",
+                1 if n_classes * 2 > 2**n_informative else min(2, max(1, (2**n_informative) // n_classes)),
+            )
+        )
+        class_sep = float(dataset_kwargs.get("class_sep", 1.25))
+        flip_y = float(dataset_kwargs.get("flip_y", min(max(noise, 0.0), 0.4)))
+        X, y = make_classification(
+            n_samples=n_total,
+            n_features=input_dim,
+            n_informative=n_informative,
+            n_redundant=n_redundant,
+            n_repeated=n_repeated,
+            n_classes=n_classes,
+            n_clusters_per_class=n_clusters_per_class,
+            class_sep=class_sep,
+            flip_y=flip_y,
+            random_state=seed,
+        )
+    elif key == "gaussian_quantiles":
+        cov = float(dataset_kwargs.get("cov", 1.0))
+        X, y = make_gaussian_quantiles(
+            n_samples=n_total,
+            n_features=input_dim,
+            n_classes=n_classes,
+            cov=cov,
+            random_state=seed,
+        )
+        if noise > 0.0:
+            X = X + rng.normal(scale=noise, size=X.shape)
+    else:
+        raise ValueError(
+            f"Unsupported dataset_name '{dataset_name}'. Choose from: "
+            "'moons', 'circles', 'blobs', 'classification', 'gaussian_quantiles'."
+        )
+
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=n_test, random_state=seed, stratify=y
     )
@@ -46,6 +165,27 @@ def get_moons_dataset(
         torch.tensor(y_train, dtype=torch.long, device=device),
         torch.tensor(X_test, dtype=dtype, device=device),
         torch.tensor(y_test, dtype=torch.long, device=device),
+    )
+
+
+def get_moons_dataset(
+    n_train: int = 600,
+    n_test: int = 300,
+    noise: float = 0.10,
+    seed: int = 42,
+    dtype: torch.dtype = torch.float64,
+    device: str | torch.device = "cpu",
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Generate standardized make_moons train and test datasets."""
+    return get_synthetic_dataset(
+        dataset_name="moons",
+        n_train=n_train,
+        n_test=n_test,
+        n_classes=2,
+        noise=noise,
+        seed=seed,
+        dtype=dtype,
+        device=device,
     )
 
 
@@ -68,20 +208,26 @@ def make_evaluation_grid(
 
 
 class MoonsMLP(nn.Module):
-    """MLP with architecture [2 -> 5 -> 10 -> 15 -> 10 -> 2] and smooth activations."""
+    """Configurable MLP supporting arbitrary layer_dims, hidden activation, and output activation."""
 
     def __init__(
         self,
         layer_dims: Sequence[int] = (2, 5, 10, 15, 10, 2),
         activation: str = "tanh",
+        output_activation: Optional[str] = "identity",
         beta: float = 3.0,
         seed: int = 42,
         dtype: torch.dtype = torch.float64,
     ) -> None:
         super().__init__()
+        if len(layer_dims) < 2:
+            raise ValueError(f"layer_dims must have at least 2 entries [in_dim, out_dim], got {layer_dims}")
         torch.manual_seed(seed)
-        self.layer_dims = list(layer_dims)
-        self.activation_name = activation.lower()
+        self.layer_dims = [int(d) for d in layer_dims]
+        self.activation_name = activation.lower().strip()
+        self.output_activation_name = (
+            "identity" if output_activation is None else output_activation.lower().strip()
+        )
         self.beta = beta
         self.num_layers = len(self.layer_dims) - 1
 
@@ -93,18 +239,36 @@ class MoonsMLP(nn.Module):
             layers.append(lin)
         self.layers = nn.ModuleList(layers)
 
-    def _activate(self, u: torch.Tensor) -> torch.Tensor:
-        if self.activation_name == "tanh":
+    def _apply_activation(self, u: torch.Tensor, act_name: str) -> torch.Tensor:
+        if act_name in ("identity", "linear", "none", ""):
+            return u
+        if act_name == "tanh":
             return torch.tanh(u)
-        if self.activation_name == "gelu":
+        if act_name == "gelu":
             return F.gelu(u)
-        if self.activation_name == "silu":
+        if act_name in ("silu", "swish"):
             return F.silu(u)
-        if self.activation_name == "softplus":
+        if act_name == "softplus":
             return F.softplus(u, beta=self.beta)
-        if self.activation_name == "relu":
+        if act_name == "elu":
+            return F.elu(u)
+        if act_name == "sigmoid":
+            return torch.sigmoid(u)
+        if act_name == "sin":
+            return torch.sin(u)
+        if act_name == "softmax":
+            return F.softmax(u, dim=-1)
+        if act_name == "log_softmax":
+            return F.log_softmax(u, dim=-1)
+        if act_name == "relu":
             return F.relu(u)
-        raise ValueError(f"Unsupported activation: {self.activation_name}")
+        raise ValueError(f"Unsupported activation: '{act_name}'")
+
+    def _activate(self, u: torch.Tensor) -> torch.Tensor:
+        return self._apply_activation(u, self.activation_name)
+
+    def _activate_output(self, u: torch.Tensor) -> torch.Tensor:
+        return self._apply_activation(u, self.output_activation_name)
 
     def forward_up_to_layer(self, x: torch.Tensor, layer_idx: int) -> torch.Tensor:
         """Compute representation Phi^(layer_idx)(x) for layer_idx in {0, 1, ..., L}."""
@@ -118,16 +282,20 @@ class MoonsMLP(nn.Module):
             h = self.layers[idx](h)
             if idx < self.num_layers - 1:
                 h = self._activate(h)
+            else:
+                h = self._activate_output(h)
         return h
 
     def forward_all_layers(self, x: torch.Tensor) -> List[torch.Tensor]:
-        """Return representations [x, h^(1), h^(2), h^(3), h^(4), z^(5)]."""
+        """Return representations [x, h^(1), ..., z^(L)]."""
         reps = [x]
         h = x
         for idx, layer in enumerate(self.layers):
             h = layer(h)
             if idx < self.num_layers - 1:
                 h = self._activate(h)
+            else:
+                h = self._activate_output(h)
             reps.append(h)
         return reps
 
@@ -140,10 +308,9 @@ def _make_single_point_layer_fn(
     layer_idx: int,
     params: Optional[Dict[str, torch.Tensor]] = None,
 ) -> Callable[[torch.Tensor], torch.Tensor]:
-    """Return a function phi(x_single) -> h_single for a single 2D point x_single."""
+    """Return a function phi(x_single) -> h_single for a single input point x_single."""
     if params is None:
         params = dict(model.named_parameters())
-    buffers = dict(model.named_buffers())
 
     def phi_single(x_single: torch.Tensor) -> torch.Tensor:
         if layer_idx == 0:
@@ -155,6 +322,8 @@ def _make_single_point_layer_fn(
             h = F.linear(h, w, b)
             if idx < model.num_layers - 1:
                 h = model._activate(h)
+            else:
+                h = model._activate_output(h)
         return h
 
     return phi_single
@@ -365,7 +534,7 @@ def compute_parameter_fim(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute the P x P Parameter Fisher Information Matrix F(theta) and per-sample score vectors.
 
-    F_{mu,nu}(theta) = E_x [ sum_{c=0}^1 p(y=c|x; theta) d_mu log p(y=c|x) d_nu log p(y=c|x) ]
+    F_{mu,nu}(theta) = E_x [ sum_{c=0}^{C-1} p(y=c|x; theta) d_mu log p(y=c|x) d_nu log p(y=c|x) ]
     """
     params = {k: v.detach() for k, v in model.named_parameters()}
     buffers = dict(model.named_buffers())
@@ -375,21 +544,21 @@ def compute_parameter_fim(
         logits = functional_call(model, (p_dict, buffers), (x_single.unsqueeze(0),)).squeeze(0)
         return F.log_softmax(logits, dim=-1)
 
-    # jac_params has keys matching params, each of shape (N, 2, *param.shape)
+    with torch.no_grad():
+        probs = F.softmax(model(X), dim=-1)  # (N, C)
+    N, n_out = probs.shape
+
+    # jac_params has keys matching params, each of shape (N, C, *param.shape)
     jac_fn = vmap(jacrev(log_probs_single, argnums=0), in_dims=(None, 0))
     jac_dict = jac_fn(params, X)
 
-    N = X.shape[0]
     J_flat = torch.cat(
-        [jac_dict[k].reshape(N, 2, -1) for k in param_keys], dim=-1
-    )  # (N, 2, P)
-
-    with torch.no_grad():
-        probs = F.softmax(model(X), dim=-1)  # (N, 2)
+        [jac_dict[k].reshape(N, n_out, -1) for k in param_keys], dim=-1
+    )  # (N, C, P)
 
     # Weight each class derivative by sqrt(p(y=c|x))
-    weighted_J = J_flat * torch.sqrt(probs).unsqueeze(-1)  # (N, 2, P)
-    flat_scores = weighted_J.reshape(N * 2, -1)  # (2N, P)
+    weighted_J = J_flat * torch.sqrt(probs).unsqueeze(-1)  # (N, C, P)
+    flat_scores = weighted_J.reshape(N * n_out, -1)  # (N*C, P)
     P = flat_scores.shape[1]
     fim = (flat_scores.T @ flat_scores) / float(N) + damping * torch.eye(
         P, dtype=X.dtype, device=X.device
@@ -402,9 +571,9 @@ def compute_data_information_matrix(
     X: torch.Tensor,
     eps: float = 1e-7,
 ) -> torch.Tensor:
-    """Compute the 2 x 2 Data Information Matrix DIM_{ij}(x; theta) for each input point x in X.
+    """Compute the d_0 x d_0 Data Information Matrix DIM_{ij}(x; theta) for each input point x in X.
 
-    DIM_{ij}(x) = sum_{c=0}^1 p(y=c|x; theta) (d_i log p(y=c|x)) (d_j log p(y=c|x))
+    DIM_{ij}(x) = sum_{c=0}^{C-1} p(y=c|x; theta) (d_i log p(y=c|x)) (d_j log p(y=c|x))
     """
     params = dict(model.named_parameters())
     buffers = dict(model.named_buffers())
@@ -413,12 +582,77 @@ def compute_data_information_matrix(
         logits = functional_call(model, (params, buffers), (x_single.unsqueeze(0),)).squeeze(0)
         return F.log_softmax(logits, dim=-1)
 
-    J_x = vmap(jacrev(log_probs_x))(X)  # (N, 2_classes, 2_inputs)
-    probs = torch.exp(vmap(log_probs_x)(X))  # (N, 2_classes)
-    weighted_Jx = J_x * torch.sqrt(probs).unsqueeze(-1)  # (N, 2, 2)
+    J_x = vmap(jacrev(log_probs_x))(X)  # (N, C, d_in)
+    probs = torch.exp(vmap(log_probs_x)(X))  # (N, C)
+    weighted_Jx = J_x * torch.sqrt(probs).unsqueeze(-1)  # (N, C, d_in)
     dim_matrix = torch.einsum("nci,ncj->nij", weighted_Jx, weighted_Jx)
-    eye2 = torch.eye(2, dtype=X.dtype, device=X.device).unsqueeze(0)
-    return dim_matrix + eps * eye2
+    d_in = X.shape[-1]
+    eye_d = torch.eye(d_in, dtype=X.dtype, device=X.device).unsqueeze(0)
+    return dim_matrix + eps * eye_d
+
+
+def scalar_geometric_predict(
+    psi: torch.Tensor,
+    n_classes: int = 2,
+    margin: float = 0.5,
+) -> torch.Tensor:
+    """Classify points from a scalar geometric invariant psi(x) into {0, ..., n_classes - 1}.
+
+    For n_classes == 2, reduces identically to I[psi(x) > 0].
+    For n_classes > 2, partitions R into n_classes ordered intervals separated at midpoints
+    between class target levels t_c = 2 * margin * (c - (n_classes - 1) / 2).
+    """
+    if n_classes <= 2:
+        return (psi > 0.0).long()
+    idx = torch.arange(n_classes - 1, dtype=psi.dtype, device=psi.device)
+    boundaries = 2.0 * margin * (idx + 0.5 - 0.5 * (n_classes - 1))
+    return torch.bucketize(psi.contiguous(), boundaries)
+
+
+def _scalar_geometric_margin_loss_and_weights(
+    psi: torch.Tensor,
+    y: torch.Tensor,
+    margin: float,
+    beta_hinge: float,
+    n_classes: Optional[int] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute scalar geometric margin loss, predicted labels, and GGN residual weights."""
+    inferred_c = int(y.max().item()) + 1 if y.numel() > 0 else 2
+    c_total = max(2, inferred_c if n_classes is None else max(n_classes, inferred_c))
+
+    if c_total == 2:
+        signs = 2.0 * y.to(psi.dtype) - 1.0
+        violations = margin - signs * psi
+        loss = F.softplus(violations, beta=beta_hinge).mean()
+        with torch.no_grad():
+            preds = (psi > 0.0).long()
+            sig = torch.sigmoid(beta_hinge * violations)
+            w_psi = torch.sqrt(beta_hinge * sig * (1.0 - sig) + 0.10)
+        return loss, preds, w_psi
+
+    # Multi-class ordered geometric bands: t_c = 2 * margin * (c - (C - 1)/2)
+    targets = 2.0 * margin * (y.to(psi.dtype) - 0.5 * (c_total - 1))
+    half_band = 0.5 * margin
+    lower_v = (targets - half_band) - psi
+    upper_v = psi - (targets + half_band)
+    # Outer classes are one-sided rays (<= t_0 or >= t_{C-1}); interior classes are bounded intervals
+    pen_low = torch.where(y == 0, torch.zeros_like(psi), F.softplus(lower_v, beta=beta_hinge))
+    pen_high = torch.where(y == (c_total - 1), torch.zeros_like(psi), F.softplus(upper_v, beta=beta_hinge))
+    # Outer classes enforce psi <= t_0 + half_band (y=0) and psi >= t_{C-1} - half_band (y=C-1)
+    pen_outer_0 = torch.where(y == 0, F.softplus(psi - (targets + half_band), beta=beta_hinge), torch.zeros_like(psi))
+    pen_outer_top = torch.where(
+        y == (c_total - 1), F.softplus((targets - half_band) - psi, beta=beta_hinge), torch.zeros_like(psi)
+    )
+    interior_mask = (y > 0) & (y < (c_total - 1))
+    per_sample = torch.where(interior_mask, pen_low + pen_high, pen_outer_0 + pen_outer_top)
+    loss = per_sample.mean()
+    with torch.no_grad():
+        preds = scalar_geometric_predict(psi, n_classes=c_total, margin=margin)
+        sig_l = torch.sigmoid(beta_hinge * lower_v)
+        sig_u = torch.sigmoid(beta_hinge * upper_v)
+        curv_w = beta_hinge * (sig_l * (1.0 - sig_l) + sig_u * (1.0 - sig_u))
+        w_psi = torch.sqrt(curv_w + 0.15)
+    return loss, preds, w_psi
 
 
 def curvature_margin_loss(
@@ -430,27 +664,28 @@ def curvature_margin_loss(
     lambda_vol: float = 0.05,
     lambda_iso: float = 0.01,
     k_clip: float = 15.0,
+    n_classes: Optional[int] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """Purely geometric loss placing Class 0 in K <= -margin and Class 1 in K >= +margin.
+    """Purely geometric loss separating classes by intrinsic Gaussian curvature K(x).
 
     Includes Riemannian volume stabilization (log det g)^2 and metric scale stabilization
     to prevent trivial metric collapse without using any non-geometric logit targets.
     """
-    signs = (2.0 * y.to(K.dtype) - 1.0)  # -1 for Class 0, +1 for Class 1
-    # Smoothly bound extreme curvature spikes during early training
     K_bounded = k_clip * torch.tanh(K / k_clip)
-    margin_violations = margin - signs * K_bounded
-    loss_curv = F.softplus(margin_violations, beta=beta_hinge).mean()
+    loss_curv, preds_b, _ = _scalar_geometric_margin_loss_and_weights(
+        K_bounded, y, margin=margin, beta_hinge=beta_hinge, n_classes=n_classes
+    )
 
     det_g = torch.clamp(torch.linalg.det(g), min=1e-8)
     loss_vol = (torch.log(det_g) ** 2).mean()
 
-    eye2 = torch.eye(2, dtype=g.dtype, device=g.device).unsqueeze(0)
+    eye2 = torch.eye(g.shape[-1], dtype=g.dtype, device=g.device).unsqueeze(0)
     loss_iso = ((g - eye2) ** 2).mean()
 
     total_loss = loss_curv + lambda_vol * loss_vol + lambda_iso * loss_iso
     with torch.no_grad():
-        preds = (K > 0.0).long()
+        c_eval = max(2, int(y.max().item()) + 1 if n_classes is None else n_classes)
+        preds = (K > 0.0).long() if c_eval == 2 else preds_b
         acc = (preds == y).to(K.dtype).mean().item()
         k_c0 = K[y == 0].mean().item() if (y == 0).any() else 0.0
         k_c1 = K[y == 1].mean().item() if (y == 1).any() else 0.0
@@ -473,27 +708,24 @@ def volume_contrastive_loss(
     margin: float = 0.6,
     beta_hinge: float = 4.0,
     lambda_iso: float = 0.02,
+    n_classes: Optional[int] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """Purely geometric loss separating classes by Riemannian log-volume element log(sqrt(det g)).
-
-    Class 0 -> volume contraction (log sqrt(det g) <= -margin)
-    Class 1 -> volume expansion   (log sqrt(det g) >= +margin)
-    """
-    signs = (2.0 * y.to(g.dtype) - 1.0)
+    """Purely geometric loss separating classes by Riemannian log-volume element log(sqrt(det g))."""
     log_vol = 0.5 * torch.log(torch.clamp(torch.linalg.det(g), min=1e-8))
-    loss_vol_sep = F.softplus(margin - signs * log_vol, beta=beta_hinge).mean()
+    loss_vol_sep, preds, _ = _scalar_geometric_margin_loss_and_weights(
+        log_vol, y, margin=margin, beta_hinge=beta_hinge, n_classes=n_classes
+    )
     loss_reg = (log_vol ** 2).mean() * lambda_iso
     total = loss_vol_sep + loss_reg
 
     with torch.no_grad():
-        preds = (log_vol > 0.0).long()
         acc = (preds == y).to(g.dtype).mean().item()
 
     return total, {
         "loss_total": total.item(),
         "geom_acc": acc,
-        "mean_log_vol_c0": log_vol[y == 0].mean().item(),
-        "mean_log_vol_c1": log_vol[y == 1].mean().item(),
+        "mean_log_vol_c0": log_vol[y == 0].mean().item() if (y == 0).any() else 0.0,
+        "mean_log_vol_c1": log_vol[y == 1].mean().item() if (y == 1).any() else 0.0,
     }
 
 
@@ -503,28 +735,25 @@ def anisotropy_margin_loss(
     margin: float = 0.6,
     beta_hinge: float = 4.0,
     lambda_vol: float = 0.05,
+    n_classes: Optional[int] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """Purely geometric loss separating classes by directional metric polarization log(g_11 / g_22).
-
-    Class 0 -> horizontal metric compression / vertical stretch (log(g_11 / g_22) <= -margin)
-    Class 1 -> horizontal metric stretch / vertical compression (log(g_11 / g_22) >= +margin)
-    """
-    signs = (2.0 * y.to(g.dtype) - 1.0)
+    """Purely geometric loss separating classes by directional metric polarization log(g_11 / g_22)."""
     log_ratio = torch.log(torch.clamp(g[:, 0, 0], min=1e-8) / torch.clamp(g[:, 1, 1], min=1e-8))
-    loss_aniso = F.softplus(margin - signs * log_ratio, beta=beta_hinge).mean()
+    loss_aniso, preds, _ = _scalar_geometric_margin_loss_and_weights(
+        log_ratio, y, margin=margin, beta_hinge=beta_hinge, n_classes=n_classes
+    )
     det_g = torch.clamp(torch.linalg.det(g), min=1e-8)
     loss_vol = (torch.log(det_g) ** 2).mean()
     total = loss_aniso + lambda_vol * loss_vol
 
     with torch.no_grad():
-        preds = (log_ratio > 0.0).long()
         acc = (preds == y).to(g.dtype).mean().item()
 
     return total, {
         "loss_total": total.item(),
         "geom_acc": acc,
-        "mean_aniso_c0": log_ratio[y == 0].mean().item(),
-        "mean_aniso_c1": log_ratio[y == 1].mean().item(),
+        "mean_aniso_c0": log_ratio[y == 0].mean().item() if (y == 0).any() else 0.0,
+        "mean_aniso_c1": log_ratio[y == 1].mean().item() if (y == 1).any() else 0.0,
     }
 
 
@@ -600,7 +829,7 @@ def compute_uncoupled_coord_metric(
         return functional_call(model, (p_dict, buffers), (X,)).reshape(-1)
 
     J_dict = jacfwd(z_flat)(params)
-    J_flat = torch.cat([J_dict[k].reshape(2 * N, -1) for k in param_keys], dim=-1)
+    J_flat = torch.cat([J_dict[k].reshape(-1, params[k].numel()) for k in param_keys], dim=-1)
     P = J_flat.shape[1]
     return (J_flat.T @ J_flat) / float(N) + damping * torch.eye(P, dtype=X.dtype, device=X.device)
 
@@ -661,6 +890,7 @@ def compute_coupled_geometric_metric(
     lambda_vol: Optional[float] = None,
     lambda_iso: float = 0.005,
     damping: float = 2e-2,
+    n_classes: Optional[int] = None,
 ) -> torch.Tensor:
     """Compute the task-coupled P x P parameter metric induced by data-space geometry and target invariant.
 
@@ -670,7 +900,6 @@ def compute_coupled_geometric_metric(
     params = {k: v.detach() for k, v in model.named_parameters()}
     param_keys = list(params.keys())
     N = X.shape[0]
-    signs = 2.0 * y.to(X.dtype) - 1.0
 
     if lambda_vol is None:
         lambda_vol = {"curvature": 0.02, "volume": 0.02, "anisotropy": 0.05}[task]
@@ -705,8 +934,9 @@ def compute_coupled_geometric_metric(
 
     with torch.no_grad():
         psi0, g0, _ = eval_geom_components(params)
-        sig0 = torch.sigmoid(beta_hinge * (margin - signs * psi0))
-        w_psi = torch.sqrt(beta_hinge * sig0 * (1.0 - sig0) + 0.10)
+        _, _, w_psi = _scalar_geometric_margin_loss_and_weights(
+            psi0, y, margin=margin, beta_hinge=beta_hinge, n_classes=n_classes
+        )
         g0_inv_sqrt = _sym2_inv_sqrt(g0, eps=inv_eps)
         w_dw = math.sqrt(dewitt_weight)
 
@@ -988,6 +1218,7 @@ def woodbury_coupled_ngd_direction(
     beta_hinge: float = 4.0,
     dewitt_weight: float = 0.20,
     damping: float = 3e-2,
+    n_classes: Optional[int] = None,
 ) -> Tuple[torch.Tensor, float]:
     """Matrix-free O(R^2 P) Woodbury Natural Gradient direction using 1st-order FD stencils on a subsample X_sub.
 
@@ -998,7 +1229,6 @@ def woodbury_coupled_ngd_direction(
     params = {k: v.detach() for k, v in model.named_parameters()}
     param_keys = list(params.keys())
     S = X_sub.shape[0]
-    signs = 2.0 * y_sub.to(X_sub.dtype) - 1.0
 
     def fd_sub_terms(p_dict: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         if task == "curvature":
@@ -1017,8 +1247,9 @@ def woodbury_coupled_ngd_direction(
 
     with torch.no_grad():
         psi0, g0 = fd_sub_terms(params)
-        sig0 = torch.sigmoid(beta_hinge * (margin - signs * psi0))
-        w_psi = torch.sqrt(beta_hinge * sig0 * (1.0 - sig0) + 0.10)
+        _, _, w_psi = _scalar_geometric_margin_loss_and_weights(
+            psi0, y_sub, margin=margin, beta_hinge=beta_hinge, n_classes=n_classes
+        )
         g0_inv_sqrt = _sym2_inv_sqrt(g0, eps=1e-3)
         w_dw = math.sqrt(dewitt_weight)
 

@@ -1,4 +1,4 @@
-"""Build and execute all 5 differential geometry research notebooks."""
+"""Build and execute all 7 differential geometry research notebooks."""
 
 from __future__ import annotations
 
@@ -19,19 +19,44 @@ def build_notebook_01() -> None:
 # Notebook 01: Baseline MLP Training and Layerwise Pullback Metric Tensors
 
 ## Research Objective
-We study how a Multi-Layer Perceptron with architecture **`[2 -> 5 -> 10 -> 15 -> 10 -> 2]`** transforms the 2D `make_moons` manifold across layers $\ell \in \{1, 2, 3, 4, 5\}$.
+We study how a configurable Multi-Layer Perceptron (default **`[2 -> 5 -> 10 -> 15 -> 10 -> 2]`**) transforms a 2D synthetic classification manifold across layers $\ell \in \{1, \dots, L\}$.
 
 At each layer $\ell$, the representation map $\Phi^{(\ell)}_\theta : \mathbb{R}^2 \to \mathbb{R}^{d_\ell}$ induces a **$2 \times 2$ Riemannian pullback metric tensor** on the input coordinate chart $x = (x^1, x^2) \in \mathbb{R}^2$:
 $$g^{(\ell)}_{ij}(x; \theta) = \left( (J^{(\ell)}(x))^T J^{(\ell)}(x) \right)_{ij} = \sum_{a=1}^{d_\ell} \frac{\partial \Phi^{(\ell)}_a(x)}{\partial x^i} \frac{\partial \Phi^{(\ell)}_a(x)}{\partial x^j}, \quad i, j \in \{1, 2\}$$
 
 From $g^{(\ell)}(x; \theta)$ we extract two fundamental geometric diagnostics:
 1. **Riemannian Volume Magnification**: $\mathrm{d}V^{(\ell)}(x) = \sqrt{\det g^{(\ell)}(x; \theta)}$, measuring how local area elements expand or contract across layers (**Hauser & Ray, 2017**; **Zavatone-Veth et al., 2023**).
-2. **Metric Anisotropy (Condition Number)**: $\kappa(g^{(\ell)}(x)) = \lambda_{\max}(g^{(\ell)}) / \lambda_{\min}(g^{(\ell)})$ and **Tissot Indicatrices**, revealing how dimension-contracting layers ($15 \to 10 \to 2$) compress directions tangent to equivalence classes while stretching directions orthogonal to the decision boundary (**Benfenati & Marta, 2023**).
+2. **Metric Anisotropy (Condition Number)**: $\kappa(g^{(\ell)}(x)) = \lambda_{\max}(g^{(\ell)}) / \lambda_{\min}(g^{(\ell)})$ and **Tissot Indicatrices**, revealing how dimension-contracting layers compress directions tangent to equivalence classes while stretching directions orthogonal to the decision boundary (**Benfenati & Marta, 2023**).
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
+# =============================================================================
+# USER CONFIGURATION
+# =============================================================================
+# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
+#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
+DATASET_NAME = "moons"
+N_CLASSES = 2                  # Number of classes (defaults to 2)
+DATASET_PARAMS = {
+    "n_train": 400,
+    "n_test": 200,
+    "noise": 0.10,             # Noise std (or flip_y for "classification")
+    "seed": 42,
+    # Optional dataset-specific parameters: e.g. factor=0.5 ("circles"),
+    # cluster_std=0.65 ("blobs"), class_sep=1.25 ("classification")
+}
+
+# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
+LAYER_DIMS = [2, 5, 10, 15, 10, 2]
+
+# 3. Activation Functions for Hidden Layers and Output Layer
+#    Options: "tanh", "gelu", "silu", "softplus", "elu", "sigmoid", "sin", "relu", "identity"
+HIDDEN_ACTIVATION = "tanh"
+OUTPUT_ACTIVATION = "identity"
+# =============================================================================
+
 import sys
 from pathlib import Path
 for p in [Path.cwd(), Path.cwd().parent]:
@@ -47,7 +72,7 @@ from matplotlib.patches import Ellipse
 
 from src.geometry import (
     MoonsMLP,
-    get_moons_dataset,
+    get_synthetic_dataset,
     make_evaluation_grid,
     compute_layer_pullback_metric,
     compute_volume_element,
@@ -57,22 +82,38 @@ from src.geometry import (
 plt.rcParams["figure.dpi"] = 120
 plt.rcParams["font.size"] = 10
 
-X_train, y_train, X_test, y_test = get_moons_dataset(n_train=400, n_test=200, noise=0.10, seed=42)
+CE_LAYER_DIMS = [*LAYER_DIMS[:-1], max(LAYER_DIMS[-1], N_CLASSES)]
+CLASS_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
+
+X_train, y_train, X_test, y_test = get_synthetic_dataset(
+    dataset_name=DATASET_NAME,
+    n_classes=N_CLASSES,
+    input_dim=CE_LAYER_DIMS[0],
+    **DATASET_PARAMS,
+)
 xx, yy, grid_pts = make_evaluation_grid(X_train, n_grid=32, padding=0.45)
-print(f"Train samples: {X_train.shape}, Test samples: {X_test.shape}, Grid points: {grid_pts.shape}")
+print(
+    f"Dataset: {DATASET_NAME} (classes={N_CLASSES}) | Train: {X_train.shape}, Test: {X_test.shape} | "
+    f"MLP: {CE_LAYER_DIMS} (hidden={HIDDEN_ACTIVATION}, out={OUTPUT_ACTIVATION})"
+)
 """,
         },
         {
             "type": "markdown",
             "source": r"""
 ## 1. Baseline Cross-Entropy Training and Checkpoint Capture
-We train the `[2 -> 5 -> 10 -> 15 -> 10 -> 2]` MLP with `tanh` activations using standard Cross-Entropy loss and record parameter checkpoints across training epochs $t \in \{0, 25, 80, 250\}$.
+We train the configured MLP using standard Cross-Entropy loss and record parameter checkpoints across training epochs $t \in \{0, 25, 80, 250\}$.
 """,
         },
         {
             "type": "code",
-            "source": """
-model = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=42)
+            "source": r"""
+model = MoonsMLP(
+    layer_dims=CE_LAYER_DIMS,
+    activation=HIDDEN_ACTIVATION,
+    output_activation=OUTPUT_ACTIVATION,
+    seed=42,
+)
 total_params = sum(p.numel() for p in model.parameters())
 print(f"MoonsMLP Architecture: {model.layer_dims} | Total parameters P = {total_params}")
 
@@ -113,17 +154,25 @@ axes[0].legend()
 axes[0].grid(alpha=0.3)
 
 with torch.no_grad():
-    probs_grid = torch.softmax(model(grid_pts), dim=-1)[:, 1].reshape(xx.shape).numpy()
+    probs_all = torch.softmax(model(grid_pts), dim=-1)
+    if N_CLASSES == 2:
+        decision_field = probs_all[:, 1].reshape(xx.shape).numpy()
+        bnd_levels = [0.5]
+    else:
+        decision_field = probs_all.argmax(dim=-1).reshape(xx.shape).numpy().astype(float)
+        bnd_levels = list(np.arange(0.5, N_CLASSES - 0.5, 1.0))
 
-cf = axes[1].contourf(xx, yy, probs_grid, levels=25, cmap="coolwarm", alpha=0.85)
-axes[1].contour(xx, yy, probs_grid, levels=[0.5], colors="k", linewidths=2.0)
-axes[1].scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", edgecolors="k", s=28, label="Class 0")
-axes[1].scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", edgecolors="k", s=28, label="Class 1")
-axes[1].set_title("Learned Decision Boundary P(y=1 | x)")
+cf = axes[1].contourf(xx, yy, decision_field, levels=25 if N_CLASSES == 2 else N_CLASSES, cmap="coolwarm", alpha=0.85)
+if decision_field.min() < bnd_levels[0] and decision_field.max() > bnd_levels[0]:
+    axes[1].contour(xx, yy, decision_field, levels=bnd_levels, colors="k", linewidths=2.0)
+for c in range(N_CLASSES):
+    mask_c = y_test == c
+    axes[1].scatter(X_test[mask_c, 0], X_test[mask_c, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolors="k", s=28, label=f"Class {c}")
+axes[1].set_title("Learned Decision Regions")
 axes[1].set_xlabel("$x^1$")
 axes[1].set_ylabel("$x^2$")
 axes[1].legend(loc="upper right")
-plt.colorbar(cf, ax=axes[1], label="P(y=1 | x)")
+plt.colorbar(cf, ax=axes[1], label="P(y=1 | x)" if N_CLASSES == 2 else "Predicted Class")
 plt.tight_layout()
 plt.show()
 """,
@@ -132,39 +181,36 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 2. Layerwise Volume Magnification $\sqrt{\det g^{(\ell)}(x)}$ and Anisotropy $\lambda_1 / \lambda_2$
-We evaluate $g^{(\ell)}_{ij}(x)$ across all five layers $\ell \in \{1, 2, 3, 4, 5\}$ on the 2D grid. Notice how the trained network concentrates high volume expansion ($\sqrt{\det g^{(\ell)}}$) and extreme directional stretching ($\lambda_1/\lambda_2$) along the nonlinear decision boundary separating the two moons, confirming **Zavatone-Veth et al. (2023)**.
+We evaluate $g^{(\ell)}_{ij}(x)$ across all layers $\ell \in \{1, \dots, L\}$ on the 2D grid. Notice how the trained network concentrates high volume expansion ($\sqrt{\det g^{(\ell)}}$) and extreme directional stretching ($\lambda_1/\lambda_2$) along the nonlinear decision boundary, confirming **Zavatone-Veth et al. (2023)**.
 """,
         },
         {
             "type": "code",
-            "source": """
-fig, axes = plt.subplots(2, 5, figsize=(17, 6.6), sharex=True, sharey=True)
-layer_titles = [
-    "Layer 1 (2 -> 5)",
-    "Layer 2 (5 -> 10)",
-    "Layer 3 (10 -> 15)",
-    "Layer 4 (15 -> 10)",
-    "Layer 5 (10 -> 2)",
-]
+            "source": r"""
+L = model.num_layers
+fig, axes = plt.subplots(2, L, figsize=(3.4 * L, 6.6), sharex=True, sharey=True, squeeze=False)
 
 summary_rows = []
-for idx, l_idx in enumerate(range(1, 6)):
+for idx, l_idx in enumerate(range(1, L + 1)):
+    d_prev, d_curr = model.layer_dims[l_idx - 1], model.layer_dims[l_idx]
     g_grid = compute_layer_pullback_metric(model, grid_pts, layer_idx=l_idx, metric_mode="euclidean", eps=1e-7)
     vol = compute_volume_element(g_grid).detach().numpy().reshape(xx.shape)
     evals, _, cond = compute_metric_spectrum(g_grid)
     log_vol = np.log10(np.clip(vol, 1e-6, None))
     log_cond = np.log10(np.clip(cond.detach().numpy().reshape(xx.shape), 1.0, 1e6))
 
-    summary_rows.append((l_idx, model.layer_dims[l_idx], float(np.median(vol)), float(np.max(vol)), float(np.median(cond.detach().numpy()))))
+    summary_rows.append((l_idx, d_curr, float(np.median(vol)), float(np.max(vol)), float(np.median(cond.detach().numpy()))))
 
     im0 = axes[0, idx].contourf(xx, yy, log_vol, levels=20, cmap="magma")
-    axes[0, idx].contour(xx, yy, probs_grid, levels=[0.5], colors="cyan", linewidths=1.3, linestyles="--")
-    axes[0, idx].set_title(f"{layer_titles[idx]}\\n$\\log_{{10}}\\sqrt{{\\det g^{{({l_idx})}}}}$")
+    if decision_field.min() < bnd_levels[0] and decision_field.max() > bnd_levels[0]:
+        axes[0, idx].contour(xx, yy, decision_field, levels=bnd_levels, colors="cyan", linewidths=1.3, linestyles="--")
+    axes[0, idx].set_title(f"Layer {l_idx} ({d_prev} -> {d_curr})\n" + rf"$\log_{{10}}\sqrt{{\det g^{{({l_idx})}}}}$")
     plt.colorbar(im0, ax=axes[0, idx], fraction=0.046)
 
     im1 = axes[1, idx].contourf(xx, yy, log_cond, levels=20, cmap="viridis")
-    axes[1, idx].contour(xx, yy, probs_grid, levels=[0.5], colors="white", linewidths=1.3, linestyles="--")
-    axes[1, idx].set_title(f"Anisotropy $\\log_{{10}}(\\lambda_1 / \\lambda_2)$")
+    if decision_field.min() < bnd_levels[0] and decision_field.max() > bnd_levels[0]:
+        axes[1, idx].contour(xx, yy, decision_field, levels=bnd_levels, colors="white", linewidths=1.3, linestyles="--")
+    axes[1, idx].set_title(r"Anisotropy $\log_{10}(\lambda_1 / \lambda_2)$")
     axes[1, idx].set_xlabel("$x^1$")
     plt.colorbar(im1, ax=axes[1, idx], fraction=0.046)
 
@@ -189,19 +235,22 @@ To visualize the full $2 \times 2$ tensor field $g^{(\ell)}_{ij}(x)$ rather than
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
 _, _, coarse_pts = make_evaluation_grid(X_train, n_grid=11, padding=0.3)
-fig, axes = plt.subplots(1, 3, figsize=(15, 4.6), sharex=True, sharey=True)
+sample_layers = sorted(set([1, max(1, (L + 1) // 2), L]))
+fig, axes = plt.subplots(1, len(sample_layers), figsize=(5.0 * len(sample_layers), 4.6), sharex=True, sharey=True, squeeze=False)
 
-for ax, l_idx in zip(axes, [1, 3, 5]):
+for ax, l_idx in zip(axes[0], sample_layers):
     g_c = compute_layer_pullback_metric(model, coarse_pts, layer_idx=l_idx, metric_mode="euclidean", eps=1e-6)
     evals, evecs, _ = compute_metric_spectrum(g_c)
     evals_np = np.sqrt(evals.detach().numpy())
     scale = 0.24 / (np.percentile(evals_np[:, 0], 90) + 1e-8)
 
-    ax.contour(xx, yy, probs_grid, levels=[0.5], colors="k", linewidths=1.8, linestyles="--")
-    ax.scatter(X_train[y_train == 0, 0], X_train[y_train == 0, 1], c="#1f77b4", alpha=0.20, s=14)
-    ax.scatter(X_train[y_train == 1, 0], X_train[y_train == 1, 1], c="#d62728", alpha=0.20, s=14)
+    if decision_field.min() < bnd_levels[0] and decision_field.max() > bnd_levels[0]:
+        ax.contour(xx, yy, decision_field, levels=bnd_levels, colors="k", linewidths=1.8, linestyles="--")
+    for c in range(N_CLASSES):
+        mc = y_train == c
+        ax.scatter(X_train[mc, 0], X_train[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], alpha=0.20, s=14)
 
     pts_np = coarse_pts.detach().numpy()
     evecs_np = evecs.detach().numpy()
@@ -215,7 +264,7 @@ for ax, l_idx in zip(axes, [1, 3, 5]):
 
     ax.set_title(f"Layer {l_idx} (d={model.layer_dims[l_idx]}) Pullback Metric Ellipses")
     ax.set_xlabel("$x^1$")
-axes[0].set_ylabel("$x^2$")
+axes[0, 0].set_ylabel("$x^2$")
 plt.tight_layout()
 plt.show()
 """,
@@ -223,26 +272,32 @@ plt.show()
         {
             "type": "markdown",
             "source": r"""
-## 4. Symmetry Breaking Across Training Epochs & Activation Smoothness Comparison
-We compare the pullback volume field $\sqrt{\det g^{(4)}(x)}$ from random initialization ($t=0$) through convergence ($t=250$), and compare smooth activations (`tanh`, `gelu`, `softplus`) against piecewise-linear `relu`.
+## 4. Symmetry Breaking Across Training Epochs
+We track the pullback volume field $\sqrt{\det g^{(\ell_{\text{penult}})}(x)}$ from random initialization ($t=0$) through convergence ($t=250$).
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
+penult_idx = max(1, L - 1)
 fig, axes = plt.subplots(1, 4, figsize=(16, 3.8), sharex=True, sharey=True)
-probe_model = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=42)
+probe_model = MoonsMLP(
+    layer_dims=CE_LAYER_DIMS,
+    activation=HIDDEN_ACTIVATION,
+    output_activation=OUTPUT_ACTIVATION,
+    seed=42,
+)
 
 for ax, ep in zip(axes, [0, 25, 80, 250]):
     probe_model.load_state_dict(checkpoints[ep])
-    g4 = compute_layer_pullback_metric(probe_model, grid_pts, layer_idx=4, metric_mode="euclidean", eps=1e-7)
-    vol4 = np.log10(compute_volume_element(g4).detach().numpy().reshape(xx.shape) + 1e-7)
-    im = ax.contourf(xx, yy, vol4, levels=20, cmap="plasma")
-    ax.set_title(f"Epoch {ep}: $\\log_{{10}}\\sqrt{{\\det g^{{(4)}}(x)}}$")
+    g_pen = compute_layer_pullback_metric(probe_model, grid_pts, layer_idx=penult_idx, metric_mode="euclidean", eps=1e-7)
+    vol_pen = np.log10(compute_volume_element(g_pen).detach().numpy().reshape(xx.shape) + 1e-7)
+    im = ax.contourf(xx, yy, vol_pen, levels=20, cmap="plasma")
+    ax.set_title(f"Epoch {ep}: " + rf"$\log_{{10}}\sqrt{{\det g^{{({penult_idx})}}(x)}}$")
     ax.set_xlabel("$x^1$")
     plt.colorbar(im, ax=ax, fraction=0.046)
 axes[0].set_ylabel("$x^2$")
-plt.suptitle("Emergence of Decision-Boundary Volume Magnification During Training (Layer 4)", y=1.03)
+plt.suptitle(f"Emergence of Decision-Boundary Volume Magnification During Training (Layer {penult_idx})", y=1.03)
 plt.tight_layout()
 plt.show()
 """,
@@ -259,22 +314,44 @@ def build_notebook_02() -> None:
 # Notebook 02: Christoffel Symbols, Riemann Tensor, and Gaussian Curvature Flow Across Layers
 
 ## Research Objective
-We compute the Levi-Civita connection (Christoffel symbols $\Gamma^{(\ell)k}_{ij}$) and intrinsic **Gaussian curvature** $K^{(\ell)}(x; \theta)$ of the 2D immersed representation manifolds $\mathcal{M}_\ell = \Phi^{(\ell)}_\theta(\mathbb{R}^2) \subset \mathbb{R}^{d_\ell}$ across layers $\ell \in \{1, 2, 3, 4, 5\}$:
+We compute the Levi-Civita connection (Christoffel symbols $\Gamma^{(\ell)k}_{ij}$) and intrinsic **Gaussian curvature** $K^{(\ell)}(x; \theta)$ of the 2D immersed representation manifolds $\mathcal{M}_\ell = \Phi^{(\ell)}_\theta(\mathbb{R}^2) \subset \mathbb{R}^{d_\ell}$ across layers $\ell \in \{1, \dots, L\}$:
 $$\Gamma^{(\ell)}_{kij} = \frac{1}{2}\left(\partial_j g^{(\ell)}_{ki} + \partial_i g^{(\ell)}_{kj} - \partial_k g^{(\ell)}_{ij}\right), \qquad R^{(\ell)}_{1212} = -\frac{1}{2}\left(\partial_1^2 g^{(\ell)}_{22} - 2\partial_1\partial_2 g^{(\ell)}_{12} + \partial_2^2 g^{(\ell)}_{11}\right) + g^{(\ell)km}\left(\Gamma^{(\ell)}_{k12}\Gamma^{(\ell)}_{m12} - \Gamma^{(\ell)}_{k11}\Gamma^{(\ell)}_{m22}\right)$$
 $$K^{(\ell)}(x) = \frac{R^{(\ell)}_{1212}(x)}{\det g^{(\ell)}(x)}, \qquad R_{\text{scalar}}^{(\ell)}(x) = 2 K^{(\ell)}(x)$$
 
-### Key Mathematical Insight: The 2D-to-2D Euclidean Pullback Flatness Identity at Layer $\ell = 5$
-- For hidden layers $\ell \in \{1, 2, 3, 4\}$ ($d_\ell \in \{5, 10, 15, 10\} > 2$), $\mathcal{M}_\ell$ is a 2D surface immersed in higher-dimensional Euclidean space $\mathbb{R}^{d_\ell}$, possessing rich non-zero intrinsic Gaussian curvature $K^{(\ell)}(x) \neq 0$.
-- At the output layer $\ell = 5$ ($d_5 = 2$), pulling back the flat 2D Euclidean metric $I_2$ via a local diffeomorphism $z = f_\theta(x) \in \mathbb{R}^2$ is merely a coordinate change of flat Euclidean space, so $K^{(5)}_{\text{eucl}}(x) \equiv 0$!
+### Key Mathematical Insight: The 2D-to-2D Euclidean Pullback Flatness Identity at Output Width $d_L = 2$
+- For hidden layers with $d_\ell > 2$, $\mathcal{M}_\ell$ is a 2D surface immersed in higher-dimensional Euclidean space $\mathbb{R}^{d_\ell}$, possessing rich non-zero intrinsic Gaussian curvature $K^{(\ell)}(x) \neq 0$.
+- When $d_L = 2$, pulling back the flat 2D Euclidean metric $I_2$ via a local diffeomorphism $z = f_\theta(x) \in \mathbb{R}^2$ is merely a coordinate change of flat Euclidean space, so $K^{(L)}_{\text{eucl}}(x) \equiv 0$!
 - We empirically verify this identity and compare three non-degenerate output curvature constructions:
-  1. **Graph Embedding Metric (Monge Patch in $\mathbb{R}^4$)**: $\tilde{g}^{(5)}_{ij}(x) = \delta_{ij} + ((J^{(5)}(x))^T J^{(5)}(x))_{ij}$.
-  2. **Conformal Gaussian Output Metric**: $g^{(5)}_{\text{conf}}(x) = e^{-\|z(x)\|^2 / \sigma^2} (J^{(5)}(x))^T J^{(5)}(x)$.
-  3. **Penultimate Surface Metric**: $g^{(4)}_{\text{eucl}}(x)$ on $\mathcal{M}_4 \subset \mathbb{R}^{10}$.
+  1. **Graph Embedding Metric (Monge Patch in $\mathbb{R}^{2+d_L}$)**: $\tilde{g}^{(L)}_{ij}(x) = \delta_{ij} + ((J^{(L)}(x))^T J^{(L)}(x))_{ij}$.
+  2. **Conformal Gaussian Output Metric**: $g^{(L)}_{\text{conf}}(x) = e^{-\|z(x)\|^2 / \sigma^2} (J^{(L)}(x))^T J^{(L)}(x)$.
+  3. **Penultimate Surface Metric**: $g^{(L-1)}_{\text{eucl}}(x)$ on $\mathcal{M}_{L-1}$.
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
+# =============================================================================
+# USER CONFIGURATION
+# =============================================================================
+# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
+#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
+DATASET_NAME = "moons"
+N_CLASSES = 2                  # Number of classes (defaults to 2)
+DATASET_PARAMS = {
+    "n_train": 360,
+    "n_test": 180,
+    "noise": 0.10,
+    "seed": 42,
+}
+
+# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
+LAYER_DIMS = [2, 5, 10, 15, 10, 2]
+
+# 3. Activation Functions for Hidden Layers and Output Layer
+HIDDEN_ACTIVATION = "tanh"
+OUTPUT_ACTIVATION = "identity"
+# =============================================================================
+
 import sys
 from pathlib import Path
 for p in [Path.cwd(), Path.cwd().parent]:
@@ -289,13 +366,23 @@ import matplotlib.pyplot as plt
 
 from src.geometry import (
     MoonsMLP,
-    get_moons_dataset,
+    get_synthetic_dataset,
     make_evaluation_grid,
     compute_layer_geometry,
+    compute_layer_pullback_metric,
+    compute_metric_spectrum,
     _christoffel_and_curvature_from_g_single,
 )
 
-X_train, y_train, X_test, y_test = get_moons_dataset(n_train=360, n_test=180, noise=0.10, seed=42)
+CE_LAYER_DIMS = [*LAYER_DIMS[:-1], max(LAYER_DIMS[-1], N_CLASSES)]
+CLASS_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
+
+X_train, y_train, X_test, y_test = get_synthetic_dataset(
+    dataset_name=DATASET_NAME,
+    n_classes=N_CLASSES,
+    input_dim=CE_LAYER_DIMS[0],
+    **DATASET_PARAMS,
+)
 xx, yy, grid_pts = make_evaluation_grid(X_train, n_grid=26, padding=0.45)
 
 # 1. Analytical validation on a sphere of radius R=2 (K = 1/R^2 = 0.25) and hyperbolic paraboloid (K(0) = -3.0)
@@ -306,6 +393,7 @@ _, _, _, K_sphere = _christoffel_and_curvature_from_g_single(g_sphere)(torch.ten
 g_saddle = lambda x: torch.eye(2, dtype=x.dtype) + torch.stack([2.0 * x[0], -1.5 * x[1]]).unsqueeze(0).T @ torch.stack([2.0 * x[0], -1.5 * x[1]]).unsqueeze(0)
 _, _, _, K_saddle = _christoffel_and_curvature_from_g_single(g_saddle)(torch.zeros(2, dtype=torch.float64))
 
+print(f"Dataset: {DATASET_NAME} (classes={N_CLASSES}) | MLP: {CE_LAYER_DIMS} (hidden={HIDDEN_ACTIVATION}, out={OUTPUT_ACTIVATION})")
 print(f"Analytical Validation | Sphere (R=2) exact K=0.250000 -> autodiff K={K_sphere.item():.6f}")
 print(f"Analytical Validation | Hyperbolic Saddle exact K(0)=-3.000000 -> autodiff K={K_saddle.item():.6f}")
 """,
@@ -314,13 +402,20 @@ print(f"Analytical Validation | Hyperbolic Saddle exact K(0)=-3.000000 -> autodi
             "type": "markdown",
             "source": r"""
 ## 1. Empirical Verification of 2D-to-2D Euclidean Flatness vs. Non-Degenerate Output Metrics
-We train our `[2 -> 5 -> 10 -> 15 -> 10 -> 2]` MLP and compare the four curvature definitions at the output/penultimate layers.
+We train our configured MLP and compare the four curvature definitions at the output and penultimate layers.
 """,
         },
         {
             "type": "code",
-            "source": """
-model = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=42)
+            "source": r"""
+model = MoonsMLP(
+    layer_dims=CE_LAYER_DIMS,
+    activation=HIDDEN_ACTIVATION,
+    output_activation=OUTPUT_ACTIVATION,
+    seed=42,
+)
+L = model.num_layers
+penult_idx = max(1, L - 1)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.015)
 criterion = nn.CrossEntropyLoss()
 
@@ -333,51 +428,57 @@ for ep in range(1, 201):
     if ep in [20, 70, 200]:
         epoch_snapshots[ep] = copy.deepcopy(model.state_dict())
 
-geom_l5_eucl = compute_layer_geometry(model, X_test[:50], layer_idx=5, metric_mode="euclidean", eps=1e-13)
-geom_l5_graph = compute_layer_geometry(model, X_test[:50], layer_idx=5, metric_mode="graph")
-geom_l5_conf = compute_layer_geometry(model, X_test[:50], layer_idx=5, metric_mode="conformal_gaussian", sigma=2.5)
-geom_l4_eucl = compute_layer_geometry(model, X_test[:50], layer_idx=4, metric_mode="euclidean", eps=1e-7)
+geom_lL_eucl = compute_layer_geometry(model, X_test[:50], layer_idx=L, metric_mode="euclidean", eps=1e-13)
+geom_lL_graph = compute_layer_geometry(model, X_test[:50], layer_idx=L, metric_mode="graph")
+geom_lL_conf = compute_layer_geometry(model, X_test[:50], layer_idx=L, metric_mode="conformal_gaussian", sigma=2.5)
+geom_pen_eucl = compute_layer_geometry(model, X_test[:50], layer_idx=penult_idx, metric_mode="euclidean", eps=1e-7)
 
 print("Comparison of Curvature Formulations on Trained Network (50 test points):")
-print(f"  1. Layer 5 Flat Euclidean Pullback (d=2 -> d=2) : max |K| = {geom_l5_eucl['K'].abs().max().item():.2e} (Identically Flat!)")
-print(f"  2. Layer 5 Graph Immersion Metric in R^4        : mean |K| = {geom_l5_graph['K'].abs().mean().item():.4f}, range = [{geom_l5_graph['K'].min().item():.3f}, {geom_l5_graph['K'].max().item():.3f}]")
-print(f"  3. Layer 5 Conformal Gaussian Output Metric     : mean |K| = {geom_l5_conf['K'].abs().mean().item():.4f}, range = [{geom_l5_conf['K'].min().item():.3f}, {geom_l5_conf['K'].max().item():.3f}]")
-print(f"  4. Layer 4 Penultimate Immersion in R^10        : mean |K| = {geom_l4_eucl['K'].abs().mean().item():.4f}, range = [{geom_l4_eucl['K'].min().item():.3f}, {geom_l4_eucl['K'].max().item():.3f}]")
+print(f"  1. Layer {L} Euclidean Pullback (d={model.layer_dims[L]}) : max |K| = {geom_lL_eucl['K'].abs().max().item():.2e}")
+print(f"  2. Layer {L} Graph Immersion Metric                  : mean |K| = {geom_lL_graph['K'].abs().mean().item():.4f}, range = [{geom_lL_graph['K'].min().item():.3f}, {geom_lL_graph['K'].max().item():.3f}]")
+print(f"  3. Layer {L} Conformal Gaussian Output Metric        : mean |K| = {geom_lL_conf['K'].abs().mean().item():.4f}, range = [{geom_lL_conf['K'].min().item():.3f}, {geom_lL_conf['K'].max().item():.3f}]")
+print(f"  4. Layer {penult_idx} Penultimate Immersion (d={model.layer_dims[penult_idx]}) : mean |K| = {geom_pen_eucl['K'].abs().mean().item():.4f}, range = [{geom_pen_eucl['K'].min().item():.3f}, {geom_pen_eucl['K'].max().item():.3f}]")
 """,
         },
         {
             "type": "markdown",
             "source": r"""
 ## 2. Layerwise Gaussian Curvature Landscape $K^{(\ell)}(x)$ Across Network Depth
-We plot $\mathrm{arcsinh}(K^{(\ell)}(x))$ across layers $\ell = 1, 2, 3, 4$ (Euclidean immersion in $\mathbb{R}^{d_\ell}$) and layer $\ell = 5$ (Graph immersion in $\mathbb{R}^4$).
-Notice how **Brandon, Chadwick, & Pellegrino (2025)**'s two-stage geometric decomposition appears:
-- **Early expansion layers ($\ell = 1, 2, 3$)** introduce localized positive and negative curvature folds along the moon crescents to discretize continuous input coordinates.
-- **Contraction layers ($\ell = 4, 5$)** concentrate sharp curvature ridges along the decision boundary while flattening the interior of each class manifold (discrete Ricci flow smoothing; **Baptista et al., 2024**; **Hehl et al., 2025**).
+We plot $\mathrm{arcsinh}(K^{(\ell)}(x))$ across all layers $\ell \in \{1, \dots, L\}$ (using Euclidean immersion whenever $d_\ell > 2$ and Graph immersion when $d_\ell \le 2$).
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
 with torch.no_grad():
-    probs_grid = torch.softmax(model(grid_pts), dim=-1)[:, 1].reshape(xx.shape).numpy()
+    probs_all = torch.softmax(model(grid_pts), dim=-1)
+    if N_CLASSES == 2:
+        decision_field = probs_all[:, 1].reshape(xx.shape).numpy()
+        bnd_levels = [0.5]
+    else:
+        decision_field = probs_all.argmax(dim=-1).reshape(xx.shape).numpy().astype(float)
+        bnd_levels = list(np.arange(0.5, N_CLASSES - 0.5, 1.0))
 
-fig, axes = plt.subplots(1, 5, figsize=(17.5, 3.7), sharex=True, sharey=True)
-for idx, l_idx in enumerate(range(1, 6)):
-    mode = "graph" if l_idx == 5 else "euclidean"
+layers_list = list(range(1, L + 1))
+fig, axes = plt.subplots(1, L, figsize=(3.5 * L, 3.7), sharex=True, sharey=True, squeeze=False)
+for idx, l_idx in enumerate(layers_list):
+    mode = "graph" if model.layer_dims[l_idx] <= 2 else "euclidean"
     geom = compute_layer_geometry(model, grid_pts, layer_idx=l_idx, metric_mode=mode, eps=1e-6)
     K_map = np.arcsinh(geom["K"].detach().numpy().reshape(xx.shape))
     vmax = max(np.percentile(np.abs(K_map), 96), 0.1)
 
-    im = axes[idx].contourf(xx, yy, K_map, levels=22, cmap="RdBu_r", vmin=-vmax, vmax=vmax)
-    axes[idx].contour(xx, yy, probs_grid, levels=[0.5], colors="k", linewidths=1.5, linestyles="--")
-    axes[idx].scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", s=8, alpha=0.4)
-    axes[idx].scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", s=8, alpha=0.4)
-    axes[idx].set_title(f"Layer {l_idx} (d={model.layer_dims[l_idx]}, {mode})\\n$\\mathrm{{arcsinh}}(K^{{({l_idx})}}(x))$")
-    axes[idx].set_xlabel("$x^1$")
-    plt.colorbar(im, ax=axes[idx], fraction=0.046)
+    im = axes[0, idx].contourf(xx, yy, K_map, levels=22, cmap="RdBu_r", vmin=-vmax, vmax=vmax)
+    if decision_field.min() < bnd_levels[0] and decision_field.max() > bnd_levels[0]:
+        axes[0, idx].contour(xx, yy, decision_field, levels=bnd_levels, colors="k", linewidths=1.5, linestyles="--")
+    for c in range(N_CLASSES):
+        mc = y_test == c
+        axes[0, idx].scatter(X_test[mc, 0], X_test[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], s=8, alpha=0.4)
+    axes[0, idx].set_title(f"Layer {l_idx} (d={model.layer_dims[l_idx]}, {mode})\n" + rf"$\mathrm{{arcsinh}}(K^{{({l_idx})}}(x))$")
+    axes[0, idx].set_xlabel("$x^1$")
+    plt.colorbar(im, ax=axes[0, idx], fraction=0.046)
 
-axes[0].set_ylabel("$x^2$")
-plt.suptitle("Layerwise Gaussian Curvature Landscape Across the [2 -> 5 -> 10 -> 15 -> 10 -> 2] MLP", y=1.04, fontsize=13)
+axes[0, 0].set_ylabel("$x^2$")
+plt.suptitle(f"Layerwise Gaussian Curvature Landscape Across {model.layer_dims} MLP", y=1.04, fontsize=13)
 plt.tight_layout()
 plt.show()
 """,
@@ -386,20 +487,27 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 3. Evolution of Layerwise Curvature & Christoffel Symbol Norms Across Training Epochs
-We track how the mean magnitude of Gaussian curvature $\mathbb{E}[|K^{(\ell)}(x)|]$ and Christoffel connection norm $\mathbb{E}[\|\Gamma^{(\ell)}(x)\|_F]$ evolve across layers $\ell \in \{1,\dots,5\}$ from initialization ($t=0$) to convergence ($t=200$), contrasting interior class points against decision-boundary points ($|P(y=1|x) - 0.5| < 0.15$).
+We track how the mean magnitude of Gaussian curvature $\mathbb{E}[|K^{(\ell)}(x)|]$ and Christoffel connection norm $\mathbb{E}[\|\Gamma^{(\ell)}(x)\|_F]$ evolve across layers $\ell \in \{1,\dots,L\}$ from initialization ($t=0$) to convergence ($t=200$), contrasting interior class points against decision-boundary points.
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
 with torch.no_grad():
-    p_tr = torch.softmax(model(X_train), dim=-1)[:, 1]
-    boundary_mask = (p_tr - 0.5).abs() < 0.20
+    p_tr_all = torch.softmax(model(X_train), dim=-1)
+    max_p = p_tr_all.max(dim=-1).values
+    boundary_mask = max_p < (1.0 / N_CLASSES + 0.20)
     interior_mask = ~boundary_mask
+    if not interior_mask.any():
+        interior_mask = torch.ones_like(boundary_mask)
 
-probe = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=42)
+probe = MoonsMLP(
+    layer_dims=CE_LAYER_DIMS,
+    activation=HIDDEN_ACTIVATION,
+    output_activation=OUTPUT_ACTIVATION,
+    seed=42,
+)
 epochs_list = [0, 20, 70, 200]
-layers_list = [1, 2, 3, 4, 5]
 
 fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.4))
 colors = ["#7f7f7f", "#ff7f0e", "#1f77b4", "#2ca02c"]
@@ -408,7 +516,7 @@ for ep, col in zip(epochs_list, colors):
     probe.load_state_dict(epoch_snapshots[ep])
     k_int, k_bnd, gamma_norms = [], [], []
     for l_idx in layers_list:
-        mode = "graph" if l_idx == 5 else "euclidean"
+        mode = "graph" if model.layer_dims[l_idx] <= 2 else "euclidean"
         g_tr = compute_layer_geometry(probe, X_train, layer_idx=l_idx, metric_mode=mode, eps=1e-6)
         k_abs = torch.arcsinh(g_tr["K"].abs()).detach()
         k_int.append(k_abs[interior_mask].mean().item())
@@ -421,14 +529,14 @@ for ep, col in zip(epochs_list, colors):
 
 axes[0].set_xticks(layers_list)
 axes[0].set_xticklabels([f"L{l} (d={model.layer_dims[l]})" for l in layers_list])
-axes[0].set_ylabel("Mean $\\mathrm{arcsinh}(|K^{(\\ell)}(x)|)$")
+axes[0].set_ylabel(r"Mean $\mathrm{arcsinh}(|K^{(\ell)}(x)|)$")
 axes[0].set_title("Curvature Evolution: Class Interior vs. Decision Boundary")
 axes[0].legend(fontsize=8, ncol=2)
 axes[0].grid(alpha=0.3)
 
 axes[1].set_xticks(layers_list)
 axes[1].set_xticklabels([f"L{l} (d={model.layer_dims[l]})" for l in layers_list])
-axes[1].set_ylabel("Mean Connection Norm $\\|\\Gamma^{(\\ell)k}_{ij}(x)\\|_F$")
+axes[1].set_ylabel(r"Mean Connection Norm $\|\Gamma^{(\ell)k}_{ij}(x)\|_F$")
 axes[1].set_title("Levi-Civita Connection Strength Across Layers")
 axes[1].legend()
 axes[1].grid(alpha=0.3)
@@ -444,19 +552,12 @@ plt.show()
 
 Alongside curvature $K^{(\ell)}(x)$, the pullback metric $g^{(\ell)}_{ij}(x; \theta)$ defines the **local Riemannian log-volume density**:
 $$\log \rho_{\text{vol}}^{(\ell)}(x; \theta) = \log\sqrt{\det g^{(\ell)}(x; \theta)} = \frac{1}{2}\log \det g^{(\ell)}(x; \theta)$$
-where $\log\sqrt{\det g^{(\ell)}(x)} > 0$ indicates local area expansion, $\log\sqrt{\det g^{(\ell)}(x)} < 0$ indicates local area contraction, and $\log\sqrt{\det g^{(\ell)}(x)} = 0$ is the equiareal contour ($\det g^{(\ell)} = 1$).
-
-Below we visualize:
-1. The 2D spatial landscape of $\log\sqrt{\det g^{(\ell)}(x)}$ across all five layers $\ell \in \{1, 2, 3, 4, 5\}$.
-2. The evolution of $\mathbb{E}[\log\sqrt{\det g^{(\ell)}(x)}]$ across layers $\ell = 1 \to 5$ and training epochs $t \in \{0, 20, 70, 200\}$, contrasting class interior points against the decision boundary and comparing Class $0$ vs. Class $1$.
 """,
         },
         {
             "type": "code",
-            "source": """
-from src.geometry import compute_layer_pullback_metric, compute_metric_spectrum
-
-fig, axes = plt.subplots(1, 5, figsize=(17.5, 3.7), sharex=True, sharey=True)
+            "source": r"""
+fig, axes = plt.subplots(1, L, figsize=(3.5 * L, 3.7), sharex=True, sharey=True, squeeze=False)
 print(f"{'Layer':<10} {'Width':<8} {'Min log Vol':>14} {'Mean log Vol':>14} {'Max log Vol':>14} {'Boundary Mean':>15}")
 print("-" * 80)
 
@@ -474,21 +575,24 @@ for idx, l_idx in enumerate(layers_list):
         f"{log_vol_grid.min():14.3f} {log_vol_grid.mean():14.3f} {log_vol_grid.max():14.3f} {bnd_mean:15.3f}"
     )
 
-    im = axes[idx].contourf(xx, yy, log_vol_grid, levels=22, cmap="RdBu_r", vmin=-vmax_v, vmax=vmax_v)
-    axes[idx].contour(xx, yy, log_vol_grid, levels=[0.0], colors="gold", linewidths=1.2, linestyles=":")
-    axes[idx].contour(xx, yy, probs_grid, levels=[0.5], colors="k", linewidths=1.5, linestyles="--")
-    axes[idx].scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", s=8, alpha=0.4)
-    axes[idx].scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", s=8, alpha=0.4)
-    axes[idx].set_title(f"Layer {l_idx} (d={model.layer_dims[l_idx]})\\n$\\log\\sqrt{{\\det g^{{({l_idx})}}(x)}}$")
-    axes[idx].set_xlabel("$x^1$")
-    plt.colorbar(im, ax=axes[idx], fraction=0.046)
+    im = axes[0, idx].contourf(xx, yy, log_vol_grid, levels=22, cmap="RdBu_r", vmin=-vmax_v, vmax=vmax_v)
+    if log_vol_grid.min() < 0.0 < log_vol_grid.max():
+        axes[0, idx].contour(xx, yy, log_vol_grid, levels=[0.0], colors="gold", linewidths=1.2, linestyles=":")
+    if decision_field.min() < bnd_levels[0] and decision_field.max() > bnd_levels[0]:
+        axes[0, idx].contour(xx, yy, decision_field, levels=bnd_levels, colors="k", linewidths=1.5, linestyles="--")
+    for c in range(N_CLASSES):
+        mc = y_test == c
+        axes[0, idx].scatter(X_test[mc, 0], X_test[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], s=8, alpha=0.4)
+    axes[0, idx].set_title(f"Layer {l_idx} (d={model.layer_dims[l_idx]})\n" + rf"$\log\sqrt{{\det g^{{({l_idx})}}(x)}}$")
+    axes[0, idx].set_xlabel("$x^1$")
+    plt.colorbar(im, ax=axes[0, idx], fraction=0.046)
 
-axes[0].set_ylabel("$x^2$")
-plt.suptitle("Layerwise Log Volume Density Landscape Across the [2 -> 5 -> 10 -> 15 -> 10 -> 2] MLP", y=1.04, fontsize=13)
+axes[0, 0].set_ylabel("$x^2$")
+plt.suptitle(f"Layerwise Log Volume Density Landscape Across {model.layer_dims} MLP", y=1.04, fontsize=13)
 plt.tight_layout()
 plt.show()
 
-# Track Log-Volume evolution across training epochs (Interior vs Boundary & Class 0 vs Class 1)
+# Track Log-Volume evolution across training epochs
 fig, axes = plt.subplots(1, 2, figsize=(12.8, 4.3))
 for ep, col in zip(epochs_list, colors):
     probe.load_state_dict(epoch_snapshots[ep])
@@ -499,11 +603,11 @@ for ep, col in zip(epochs_list, colors):
         lv_int.append(lv[interior_mask].mean().item())
         lv_bnd.append(lv[boundary_mask].mean().item() if boundary_mask.any() else lv.mean().item())
         lv_c0.append(lv[y_train == 0].mean().item())
-        lv_c1.append(lv[y_train == 1].mean().item())
+        lv_c1.append(lv[y_train == (N_CLASSES - 1)].mean().item())
 
     axes[0].plot(layers_list, lv_int, "o-", lw=2, color=col, label=f"Epoch {ep} (Interior)")
     axes[0].plot(layers_list, lv_bnd, "s--", lw=1.8, color=col, label=f"Epoch {ep} (Boundary)")
-    axes[1].plot(layers_list, lv_c1, "o-", lw=2, color=col, label=f"Epoch {ep} (Class 1)")
+    axes[1].plot(layers_list, lv_c1, "o-", lw=2, color=col, label=f"Epoch {ep} (Class {N_CLASSES - 1})")
     axes[1].plot(layers_list, lv_c0, "s--", lw=1.8, color=col, label=f"Epoch {ep} (Class 0)")
 
 for ax in axes:
@@ -512,12 +616,12 @@ for ax in axes:
     ax.set_xticklabels([f"L{l} (d={model.layer_dims[l]})" for l in layers_list])
     ax.grid(alpha=0.3)
 
-axes[0].set_ylabel("Mean Log Volume $\\mathbb{E}[\\log\\sqrt{\\det g^{(\\ell)}(x)}]$")
+axes[0].set_ylabel(r"Mean Log Volume $\mathbb{E}[\log\sqrt{\det g^{(\ell)}(x)}]$")
 axes[0].set_title("Log-Volume Evolution: Class Interior vs. Decision Boundary")
 axes[0].legend(fontsize=8, ncol=2)
 
-axes[1].set_ylabel("Mean Log Volume $\\mathbb{E}[\\log\\sqrt{\\det g^{(\\ell)}(x)}]$")
-axes[1].set_title("Log-Volume Evolution: Class 1 (Solid) vs. Class 0 (Dashed)")
+axes[1].set_ylabel(r"Mean Log Volume $\mathbb{E}[\log\sqrt{\det g^{(\ell)}(x)}]$")
+axes[1].set_title(f"Log-Volume Evolution: Class {N_CLASSES - 1} (Solid) vs. Class 0 (Dashed)")
 axes[1].legend(fontsize=8, ncol=2)
 
 plt.tight_layout()
@@ -529,15 +633,13 @@ plt.show()
             "source": r"""
 ## 5. Layerwise Metric Anisotropy Landscape Across Network Depth
 
-To capture how each layer stretches space directionally (beyond isotropic area change), we examine two **metric anisotropy fields** across layers $\ell \in \{1, 2, 3, 4, 5\}$:
-1. **Directional Metric Polarization**: $\log\!\big(g^{(\ell)}_{11}(x) / g^{(\ell)}_{22}(x)\big)$, measuring horizontal ($x^1$) versus vertical ($x^2$) metric dilation.
-2. **Coordinate-Invariant Spectral Anisotropy**: $\log_{10}\!\big(\lambda_1(g^{(\ell)}(x)) / \lambda_2(g^{(\ell)}(x))\big)$, measuring the condition number (ratio of principal eigenvalues) of $g^{(\ell)}(x)$ and quantifying the formation of 1D singular foliation leaves (**Benfenati & Marta, 2023**).
+To capture how each layer stretches space directionally (beyond isotropic area change), we examine **Directional Metric Polarization** $\log(g^{(\ell)}_{11} / g^{(\ell)}_{22})$ and **Spectral Anisotropy** $\log_{10}(\lambda_1 / \lambda_2)$ across layers $\ell \in \{1, \dots, L\}$.
 """,
         },
         {
             "type": "code",
-            "source": """
-fig, axes = plt.subplots(2, 5, figsize=(17.5, 6.8), sharex=True, sharey=True)
+            "source": r"""
+fig, axes = plt.subplots(2, L, figsize=(3.5 * L, 6.8), sharex=True, sharey=True, squeeze=False)
 print(f"{'Layer':<10} {'Width':<8} {'Mean log(g11/g22)':>18} {'Mean log10(l1/l2)':>18} {'Boundary log10(l1/l2)':>22}")
 print("-" * 80)
 
@@ -560,18 +662,19 @@ for idx, l_idx in enumerate(layers_list):
         f"{dir_aniso_grid.mean():+18.3f} {spec_aniso_grid.mean():18.3f} {bnd_cond:22.3f}"
     )
 
-    # Row 0: Directional polarization log(g11 / g22)
     im0 = axes[0, idx].contourf(xx, yy, dir_aniso_grid, levels=22, cmap="PuOr_r", vmin=-vmax_a, vmax=vmax_a)
-    axes[0, idx].contour(xx, yy, probs_grid, levels=[0.5], colors="k", linewidths=1.4, linestyles="--")
-    axes[0, idx].scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", s=8, alpha=0.35)
-    axes[0, idx].scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", s=8, alpha=0.35)
-    axes[0, idx].set_title(f"Layer {l_idx} (d={model.layer_dims[l_idx]})\\n$\\log(g^{{({l_idx})}}_{{11}} / g^{{({l_idx})}}_{{22}})$")
+    if decision_field.min() < bnd_levels[0] and decision_field.max() > bnd_levels[0]:
+        axes[0, idx].contour(xx, yy, decision_field, levels=bnd_levels, colors="k", linewidths=1.4, linestyles="--")
+    for c in range(N_CLASSES):
+        mc = y_test == c
+        axes[0, idx].scatter(X_test[mc, 0], X_test[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], s=8, alpha=0.35)
+    axes[0, idx].set_title(f"Layer {l_idx} (d={model.layer_dims[l_idx]})\n" + rf"$\log(g^{{({l_idx})}}_{{11}} / g^{{({l_idx})}}_{{22}})$")
     plt.colorbar(im0, ax=axes[0, idx], fraction=0.046)
 
-    # Row 1: Spectral condition number log10(lambda_1 / lambda_2)
     im1 = axes[1, idx].contourf(xx, yy, spec_aniso_grid, levels=22, cmap="viridis")
-    axes[1, idx].contour(xx, yy, probs_grid, levels=[0.5], colors="white", linewidths=1.4, linestyles="--")
-    axes[1, idx].set_title(f"Spectral $\\log_{{10}}(\\lambda_1^{{({l_idx})}} / \\lambda_2^{{({l_idx})}})$")
+    if decision_field.min() < bnd_levels[0] and decision_field.max() > bnd_levels[0]:
+        axes[1, idx].contour(xx, yy, decision_field, levels=bnd_levels, colors="white", linewidths=1.4, linestyles="--")
+    axes[1, idx].set_title(rf"Spectral $\log_{{10}}(\lambda_1^{{({l_idx})}} / \lambda_2^{{({l_idx})}})$")
     axes[1, idx].set_xlabel("$x^1$")
     plt.colorbar(im1, ax=axes[1, idx], fraction=0.046)
 
@@ -581,7 +684,6 @@ plt.suptitle("Layerwise Directional Polarization and Spectral Anisotropy Landsca
 plt.tight_layout()
 plt.show()
 
-# Track Spectral and Directional Anisotropy across training epochs
 fig, axes = plt.subplots(1, 2, figsize=(12.8, 4.3))
 for ep, col in zip(epochs_list, colors):
     probe.load_state_dict(epoch_snapshots[ep])
@@ -595,7 +697,7 @@ for ep, col in zip(epochs_list, colors):
 
         g_ep_graph = compute_layer_pullback_metric(probe, X_train, layer_idx=l_idx, metric_mode="graph").detach()
         lr = torch.log(g_ep_graph[:, 0, 0] / g_ep_graph[:, 1, 1])
-        dir_gap.append((lr[y_train == 1].mean() - lr[y_train == 0].mean()).item())
+        dir_gap.append((lr[y_train == (N_CLASSES - 1)].mean() - lr[y_train == 0].mean()).item())
 
     axes[0].plot(layers_list, spec_int, "o-", lw=2, color=col, label=f"Epoch {ep} (Interior)")
     axes[0].plot(layers_list, spec_bnd, "s--", lw=1.8, color=col, label=f"Epoch {ep} (Boundary)")
@@ -603,7 +705,7 @@ for ep, col in zip(epochs_list, colors):
 
 axes[0].set_xticks(layers_list)
 axes[0].set_xticklabels([f"L{l} (d={model.layer_dims[l]})" for l in layers_list])
-axes[0].set_ylabel("Mean Spectral Anisotropy $\\mathbb{E}[\\log_{10}(\\lambda_1^{(\\ell)} / \\lambda_2^{(\\ell)})]$")
+axes[0].set_ylabel(r"Mean Spectral Anisotropy $\mathbb{E}[\log_{10}(\lambda_1^{(\ell)} / \lambda_2^{(\ell)})]$")
 axes[0].set_title("Spectral Anisotropy Evolution: Interior vs. Boundary")
 axes[0].legend(fontsize=8, ncol=2)
 axes[0].grid(alpha=0.3)
@@ -611,7 +713,7 @@ axes[0].grid(alpha=0.3)
 axes[1].axhline(0.0, color="k", lw=1.0, ls=":")
 axes[1].set_xticks(layers_list)
 axes[1].set_xticklabels([f"L{l} (d={model.layer_dims[l]})" for l in layers_list])
-axes[1].set_ylabel("Directional Polarization Gap $\\Delta \\log(g^{(\\ell)}_{11} / g^{(\\ell)}_{22})$")
+axes[1].set_ylabel(r"Directional Polarization Gap $\Delta \log(g^{(\ell)}_{11} / g^{(\ell)}_{22})$")
 axes[1].set_title("Class Directional Anisotropy Separation Across Training Epochs")
 axes[1].legend(fontsize=8.5)
 axes[1].grid(alpha=0.3)
@@ -633,17 +735,39 @@ def build_notebook_03() -> None:
 
 ## Research Objective
 We investigate the information-geometric interplay between:
-1. **The Parameter Manifold ($\Theta \subset \mathbb{R}^{422}$)** equipped with the $422 \times 422$ **Parameter Fisher Information Matrix (FIM)**:
-   $$F_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}} \left[ \sum_{c=0}^1 p_\theta(y=c|x) \frac{\partial \log p_\theta(y=c|x)}{\partial \theta^\mu} \frac{\partial \log p_\theta(y=c|x)}{\partial \theta^\nu} \right]$$
+1. **The Parameter Manifold ($\Theta \subset \mathbb{R}^P$)** equipped with the $P \times P$ **Parameter Fisher Information Matrix (FIM)**:
+   $$F_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}} \left[ \sum_{c=0}^{C-1} p_\theta(y=c|x) \frac{\partial \log p_\theta(y=c|x)}{\partial \theta^\mu} \frac{\partial \log p_\theta(y=c|x)}{\partial \theta^\nu} \right]$$
 2. **The Data Manifold ($\mathcal{M}_0 \subset \mathbb{R}^2$)** equipped with the $2 \times 2$ **Data Information Matrix (DIM)** (**Tron, Fioresi, Novelli, & Latini, 2024/2026**; **Fasina et al., 2023**):
-   $$\mathrm{DIM}_{ij}(x; \theta) = \sum_{c=0}^1 p_\theta(y=c|x) \frac{\partial \log p_\theta(y=c|x)}{\partial x^i} \frac{\partial \log p_\theta(y=c|x)}{\partial x^j}$$
+   $$\mathrm{DIM}_{ij}(x; \theta) = \sum_{c=0}^{C-1} p_\theta(y=c|x) \frac{\partial \log p_\theta(y=c|x)}{\partial x^i} \frac{\partial \log p_\theta(y=c|x)}{\partial x^j}$$
 
 We further test **Halverson & Ruehle (2023)**'s *Metric Flow* framework by measuring how perturbations along the top vs. bottom eigenvectors of $F_{\mu\nu}(\theta)$ deform the layerwise metric tensor $g^{(\ell)}_{ij}(x; \theta)$ and Gaussian curvature $K^{(\ell)}(x; \theta)$, and compare **Euclidean Gradient Descent** against **Natural Gradient Descent** on $\Theta$.
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
+# =============================================================================
+# USER CONFIGURATION
+# =============================================================================
+# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
+#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
+DATASET_NAME = "moons"
+N_CLASSES = 2                  # Number of classes (defaults to 2)
+DATASET_PARAMS = {
+    "n_train": 240,
+    "n_test": 120,
+    "noise": 0.10,
+    "seed": 42,
+}
+
+# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
+LAYER_DIMS = [2, 5, 10, 15, 10, 2]
+
+# 3. Activation Functions for Hidden Layers and Output Layer
+HIDDEN_ACTIVATION = "tanh"
+OUTPUT_ACTIVATION = "identity"
+# =============================================================================
+
 import sys
 from pathlib import Path
 for p in [Path.cwd(), Path.cwd().parent]:
@@ -658,17 +782,32 @@ import matplotlib.pyplot as plt
 
 from src.geometry import (
     MoonsMLP,
-    get_moons_dataset,
+    get_synthetic_dataset,
     make_evaluation_grid,
     compute_parameter_fim,
     compute_data_information_matrix,
     compute_layer_geometry,
 )
 
-X_train, y_train, X_test, y_test = get_moons_dataset(n_train=240, n_test=120, noise=0.10, seed=42)
+CE_LAYER_DIMS = [*LAYER_DIMS[:-1], max(LAYER_DIMS[-1], N_CLASSES)]
+CLASS_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
+
+X_train, y_train, X_test, y_test = get_synthetic_dataset(
+    dataset_name=DATASET_NAME,
+    n_classes=N_CLASSES,
+    input_dim=CE_LAYER_DIMS[0],
+    **DATASET_PARAMS,
+)
 xx, yy, grid_pts = make_evaluation_grid(X_train, n_grid=25, padding=0.45)
 
-model = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=42)
+model = MoonsMLP(
+    layer_dims=CE_LAYER_DIMS,
+    activation=HIDDEN_ACTIVATION,
+    output_activation=OUTPUT_ACTIVATION,
+    seed=42,
+)
+L = model.num_layers
+P_total = sum(p.numel() for p in model.parameters())
 optimizer = torch.optim.Adam(model.parameters(), lr=0.015)
 criterion = nn.CrossEntropyLoss()
 
@@ -681,21 +820,29 @@ for ep in range(1, 181):
     if ep in [15, 60, 180]:
         snapshots[ep] = copy.deepcopy(model.state_dict())
 
-print("Captured parameter manifold checkpoints at epochs:", list(snapshots.keys()))
+print(
+    f"Dataset: {DATASET_NAME} (classes={N_CLASSES}) | MLP: {model.layer_dims} (P={P_total}, "
+    f"hidden={HIDDEN_ACTIVATION}, out={OUTPUT_ACTIVATION}) | Checkpoints: {list(snapshots.keys())}"
+)
 """,
         },
         {
             "type": "markdown",
             "source": r"""
-## 1. Co-Evolution of the $422 \times 422$ Parameter FIM Spectrum and $2 \times 2$ Data Information Matrix
+## 1. Co-Evolution of the $P \times P$ Parameter FIM Spectrum and $2 \times 2$ Data Information Matrix
 We compute the eigenspectrum of $F_{\mu\nu}(\theta)$ and the spatial trace of $\mathrm{DIM}_{ij}(x; \theta)$ across training checkpoints. Notice how the parameter manifold concentrates its Fisher information into a low-dimensional stiff subspace while $\mathrm{Tr}(\mathrm{DIM}(x; \theta))$ sharpens into a singular foliation along the decision boundary (**Tron et al., 2024**).
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
 fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.3))
-probe = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=42)
+probe = MoonsMLP(
+    layer_dims=CE_LAYER_DIMS,
+    activation=HIDDEN_ACTIVATION,
+    output_activation=OUTPUT_ACTIVATION,
+    seed=42,
+)
 
 ep_list = [0, 15, 60, 180]
 fim_traces, dim_traces, eff_ranks = [], [], []
@@ -715,19 +862,19 @@ for ep in ep_list:
 
 axes[0].set_xscale("log")
 axes[0].set_yscale("log")
-axes[0].set_xlabel("Parameter Eigenvalue Index $k$ ($P = 422$)")
-axes[0].set_ylabel("FIM Eigenvalue $\\lambda_k(F(\\theta))$")
-axes[0].set_title("422x422 Parameter Manifold Fisher Spectrum")
+axes[0].set_xlabel(f"Parameter Eigenvalue Index $k$ ($P = {P_total}$)")
+axes[0].set_ylabel(r"FIM Eigenvalue $\lambda_k(F(\theta))$")
+axes[0].set_title(f"{P_total}x{P_total} Parameter Manifold Fisher Spectrum")
 axes[0].legend()
 axes[0].grid(alpha=0.3)
 
 ax2 = axes[1].twinx()
-axes[1].plot(ep_list, fim_traces, "o-", color="#1f77b4", lw=2, label="Parameter $\\mathrm{Tr}(F(\\theta))$")
-axes[1].plot(ep_list, dim_traces, "s--", color="#d62728", lw=2, label="Data $\\mathbb{E}_x[\\mathrm{Tr}(\\mathrm{DIM}(x))]$")
+axes[1].plot(ep_list, fim_traces, "o-", color="#1f77b4", lw=2, label=r"Parameter $\mathrm{Tr}(F(\theta))$")
+axes[1].plot(ep_list, dim_traces, "s--", color="#d62728", lw=2, label=r"Data $\mathbb{E}_x[\mathrm{Tr}(\mathrm{DIM}(x))]$")
 ax2.plot(ep_list, eff_ranks, "^:", color="#2ca02c", lw=2, label="FIM Effective Rank")
 axes[1].set_xlabel("Training Epoch")
 axes[1].set_ylabel("Information Metric Trace")
-ax2.set_ylabel("Effective Rank of $F(\\theta)$", color="#2ca02c")
+ax2.set_ylabel(r"Effective Rank of $F(\theta)$", color="#2ca02c")
 axes[1].set_title("Parameter vs. Data Information Metric Coupling")
 lines1, labels1 = axes[1].get_legend_handles_labels()
 lines2, labels2 = ax2.get_legend_handles_labels()
@@ -738,23 +885,22 @@ plt.tight_layout()
 plt.show()
 
 for ep, ft, dt, er in zip(ep_list, fim_traces, dim_traces, eff_ranks):
-    print(f"Epoch {ep:3d} | Tr(FIM) = {ft:8.3f} | E[Tr(DIM)] = {dt:8.3f} | FIM Effective Rank = {er:6.2f} / 422")
+    print(f"Epoch {ep:3d} | Tr(FIM) = {ft:8.3f} | E[Tr(DIM)] = {dt:8.3f} | FIM Effective Rank = {er:6.2f} / {P_total}")
 """,
         },
         {
             "type": "markdown",
             "source": r"""
 ## 2. Singular Foliation of the Input Data Manifold via the Data Information Matrix (DIM)
-For a binary classifier, the unregularized $2 \times 2$ Data Information Matrix $\mathrm{DIM}_{ij}(x) = p(1-p) \nabla_i f_{\text{logit}} \nabla_j f_{\text{logit}}$ has rank at most $1$. Its kernel eigenvector $v_{\ker}(x)$ spans the tangent distribution to the **1D foliation leaves** of constant class probability (**Benfenati & Marta, 2023**; **Tron et al., 2024**), while its principal eigenvector $v_{\max}(x)$ points along the maximum information gradient across the decision boundary.
+The kernel eigenvector $v_{\ker}(x)$ of the $2 \times 2$ Data Information Matrix spans the tangent distribution to the **1D foliation leaves** of constant class probability (**Benfenati & Marta, 2023**; **Tron et al., 2024**), while its principal eigenvector points along the maximum information gradient across the decision boundary.
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
 dim_grid = compute_data_information_matrix(model, grid_pts, eps=1e-9)
 tr_dim = torch.diagonal(dim_grid, dim1=-2, dim2=-1).sum(-1).detach().numpy().reshape(xx.shape)
 evals_d, evecs_d = torch.linalg.eigh(dim_grid)
-# Kernel eigenvector (index 0, smallest eigenvalue) is tangent to foliation leaves
 v_leaf = evecs_d[:, :, 0].detach().numpy()
 u_leaf = v_leaf[:, 0].reshape(xx.shape)
 w_leaf = v_leaf[:, 1].reshape(xx.shape)
@@ -762,13 +908,14 @@ w_leaf = v_leaf[:, 1].reshape(xx.shape)
 fig, ax = plt.subplots(figsize=(7.5, 5.2))
 cf = ax.contourf(xx, yy, np.log10(tr_dim + 1e-7), levels=22, cmap="inferno")
 ax.quiver(xx[::2, ::2], yy[::2, ::2], u_leaf[::2, ::2], w_leaf[::2, ::2], color="cyan", alpha=0.8, scale=22, headwidth=2.5, label="DIM Kernel (Foliation Tangent)")
-ax.scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", edgecolors="w", s=26, label="Class 0")
-ax.scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", edgecolors="w", s=26, label="Class 1")
-ax.set_title("Data Information Matrix $\\log_{10}\\mathrm{Tr}(\\mathrm{DIM}(x))$ & Singular Foliation Tangents")
+for c in range(N_CLASSES):
+    mc = y_test == c
+    ax.scatter(X_test[mc, 0], X_test[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolors="w", s=26, label=f"Class {c}")
+ax.set_title(r"Data Information Matrix $\log_{10}\mathrm{Tr}(\mathrm{DIM}(x))$ & Singular Foliation Tangents")
 ax.set_xlabel("$x^1$")
 ax.set_ylabel("$x^2$")
 ax.legend(loc="upper right")
-plt.colorbar(cf, ax=ax, label="$\\log_{10}\\mathrm{Tr}(\\mathrm{DIM}(x))$")
+plt.colorbar(cf, ax=ax, label=r"$\log_{10}\mathrm{Tr}(\mathrm{DIM}(x))$")
 plt.tight_layout()
 plt.show()
 """,
@@ -777,19 +924,19 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 3. Metric Flow Sensitivity: Perturbing $\Theta$ Along Top vs. Null FIM Eigenvectors
-To directly test how movements on the parameter manifold $\Theta$ induce metric and curvature flows on the data manifold $\mathcal{M}_5$ (**Halverson & Ruehle, 2023**), we perturb $\theta \mapsto \theta + \delta \cdot v^{(k)}$ along unit eigenvectors $v^{(k)}$ of $F(\theta)$ for $k \in \{1, 2, 5, 20, 100, 300\}$ and measure the induced change in the data pullback metric $\|\Delta g^{(5)}(x)\|_F$ and Gaussian curvature $\|\Delta K^{(5)}(x)\|_2$.
+To directly test how movements on the parameter manifold $\Theta$ induce metric and curvature flows on the output data manifold $\mathcal{M}_L$ (**Halverson & Ruehle, 2023**), we perturb $\theta \mapsto \theta + \delta \cdot v^{(k)}$ along unit eigenvectors $v^{(k)}$ of $F(\theta)$ and measure the induced change in the data pullback metric $\|\Delta g^{(L)}(x)\|_F$ and Gaussian curvature $|\Delta K^{(L)}(x)|$.
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
 fim, _ = compute_parameter_fim(model, X_train, damping=1e-8)
 fim_evals, fim_evecs = torch.linalg.eigh(fim)
 fim_evals = fim_evals.flip(0)
 fim_evecs = fim_evecs.flip(1)
 
 base_params = {k: v.detach().clone() for k, v in model.named_parameters()}
-base_geom = compute_layer_geometry(model, X_test, layer_idx=5, metric_mode="graph", params=base_params)
+base_geom = compute_layer_geometry(model, X_test, layer_idx=L, metric_mode="graph", params=base_params)
 
 def unflatten_like(vec: torch.Tensor, template: dict) -> dict:
     out = {}
@@ -800,14 +947,14 @@ def unflatten_like(vec: torch.Tensor, template: dict) -> dict:
         offset += numel
     return out
 
-modes_to_test = [0, 1, 2, 4, 9, 19, 49, 99, 199, 350]
+modes_to_test = sorted(set(int(round(m)) for m in (np.geomspace(1, P_total, num=min(10, P_total)) - 1)))
 delta_scale = 0.08
 metric_shifts, curv_shifts, mode_evals = [], [], []
 
 for m_idx in modes_to_test:
     v_vec = fim_evecs[:, m_idx] * delta_scale
     pert_params = unflatten_like(v_vec, base_params)
-    pert_geom = compute_layer_geometry(model, X_test, layer_idx=5, metric_mode="graph", params=pert_params)
+    pert_geom = compute_layer_geometry(model, X_test, layer_idx=L, metric_mode="graph", params=pert_params)
     dg = (pert_geom["g"] - base_geom["g"]).norm(dim=(-2, -1)).mean().item()
     dK = (pert_geom["K"] - base_geom["K"]).abs().mean().item()
     metric_shifts.append(dg)
@@ -815,12 +962,12 @@ for m_idx in modes_to_test:
     mode_evals.append(fim_evals[m_idx].item())
 
 fig, ax = plt.subplots(figsize=(7.5, 4.2))
-ax.plot([m + 1 for m in modes_to_test], metric_shifts, "o-", lw=2, color="#1f77b4", label="Data Metric Shift $\\mathbb{E}[\\|\\Delta g^{(5)}(x)\\|_F]$")
-ax.plot([m + 1 for m in modes_to_test], curv_shifts, "s--", lw=2, color="#d62728", label="Data Curvature Shift $\\mathbb{E}[|\\Delta K^{(5)}(x)|]$")
+ax.plot([m + 1 for m in modes_to_test], metric_shifts, "o-", lw=2, color="#1f77b4", label=rf"Data Metric Shift $\mathbb{{E}}[\|\Delta g^{{({L})}}(x)\|_F]$")
+ax.plot([m + 1 for m in modes_to_test], curv_shifts, "s--", lw=2, color="#d62728", label=rf"Data Curvature Shift $\mathbb{{E}}[|\Delta K^{{({L})}}(x)|]$")
 ax.set_xscale("log")
 ax.set_yscale("log")
-ax.set_xlabel("Parameter FIM Eigenvector Mode Index $k$ (1 = stiffest, 422 = flattest)")
-ax.set_ylabel("Induced Geometric Deformation on Data Manifold $\\mathcal{M}_5$")
+ax.set_xlabel(f"Parameter FIM Eigenvector Mode Index $k$ (1 = stiffest, {P_total} = flattest)")
+ax.set_ylabel(rf"Induced Geometric Deformation on Data Manifold $\mathcal{{M}}_{{{L}}}$")
 ax.set_title("Coupling of Parameter Manifold FIM Modes to Data Manifold Metric & Curvature Flows")
 ax.legend()
 ax.grid(alpha=0.3)
@@ -832,14 +979,19 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 4. Euclidean Gradient Descent vs. Riemannian Natural Gradient Descent on $\Theta$
-We compare standard Euclidean Gradient Descent ($\Delta \theta = -\eta \nabla_\theta \mathcal{L}$) with damped **Natural Gradient Descent** ($\Delta \theta = -\eta (F(\theta) + \lambda I)^{-1} \nabla_\theta \mathcal{L}$), tracking both classification loss and the smoothness of the induced Gaussian curvature $K^{(5)}(x)$ on the data manifold.
+We compare standard Euclidean Gradient Descent ($\Delta \theta = -\eta \nabla_\theta \mathcal{L}$) with damped **Natural Gradient Descent** ($\Delta \theta = -\eta (F(\theta) + \lambda I)^{-1} \nabla_\theta \mathcal{L}$), tracking both classification loss and the smoothness of the induced Gaussian curvature $K^{(L)}(x)$ on the data manifold.
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
 def run_optimizer_comparison(steps: int = 45):
-    m_gd = MoonsMLP(activation="tanh", seed=11)
+    m_gd = MoonsMLP(
+        layer_dims=CE_LAYER_DIMS,
+        activation=HIDDEN_ACTIVATION,
+        output_activation=OUTPUT_ACTIVATION,
+        seed=11,
+    )
     m_ngd = copy.deepcopy(m_gd)
     crit = nn.CrossEntropyLoss()
 
@@ -853,7 +1005,8 @@ def run_optimizer_comparison(steps: int = 45):
         l_gd.backward()
         with torch.no_grad():
             for p in m_gd.parameters():
-                p -= 0.15 * p.grad
+                if p.grad is not None:
+                    p -= 0.15 * p.grad
         gd_losses.append(l_gd.item())
 
         # 2. Natural Gradient Descent on Parameter Manifold
@@ -863,7 +1016,10 @@ def run_optimizer_comparison(steps: int = 45):
         l_ngd = crit(m_ngd(X_train), y_train)
         l_ngd.backward()
         fim_curr, _ = compute_parameter_fim(m_ngd, X_train, damping=0.02)
-        g_flat = torch.cat([p.grad.reshape(-1) for p in m_ngd.parameters()])
+        g_flat = torch.cat([
+            p.grad.reshape(-1) if p.grad is not None else torch.zeros(p.numel(), dtype=X_train.dtype)
+            for p in m_ngd.parameters()
+        ])
         nat_step = torch.linalg.solve(fim_curr, g_flat)
         with torch.no_grad():
             offset = 0
@@ -874,8 +1030,8 @@ def run_optimizer_comparison(steps: int = 45):
         ngd_losses.append(l_ngd.item())
 
         if step % 3 == 0:
-            K_gd = compute_layer_geometry(m_gd, X_test[:40], layer_idx=5, metric_mode="graph")["K"].abs().mean().item()
-            K_ngd = compute_layer_geometry(m_ngd, X_test[:40], layer_idx=5, metric_mode="graph")["K"].abs().mean().item()
+            K_gd = compute_layer_geometry(m_gd, X_test[:40], layer_idx=L, metric_mode="graph")["K"].abs().mean().item()
+            K_ngd = compute_layer_geometry(m_ngd, X_test[:40], layer_idx=L, metric_mode="graph")["K"].abs().mean().item()
             gd_curv.append((step, K_gd))
             ngd_curv.append((step, K_ngd))
 
@@ -888,15 +1044,15 @@ axes[0].plot(gd_l, lw=2, color="#1f77b4", label="Euclidean Gradient Descent")
 axes[0].plot(ngd_l, lw=2, color="#2ca02c", label="Riemannian Natural Gradient (FIM)")
 axes[0].set_xlabel("Optimization Step")
 axes[0].set_ylabel("Cross-Entropy Loss")
-axes[0].set_title("Optimization Trajectory on Parameter Manifold $\\Theta$")
+axes[0].set_title(r"Optimization Trajectory on Parameter Manifold $\Theta$")
 axes[0].legend()
 axes[0].grid(alpha=0.3)
 
-axes[1].plot([x[0] for x in gd_k], [x[1] for x in gd_k], "o-", lw=2, color="#1f77b4", label="Euclidean GD Data Curvature $|K^{(5)}|$")
-axes[1].plot([x[0] for x in ngd_k], [x[1] for x in ngd_k], "s-", lw=2, color="#2ca02c", label="Natural GD Data Curvature $|K^{(5)}|$")
+axes[1].plot([x[0] for x in gd_k], [x[1] for x in gd_k], "o-", lw=2, color="#1f77b4", label=rf"Euclidean GD Data Curvature $|K^{{({L})}}|$")
+axes[1].plot([x[0] for x in ngd_k], [x[1] for x in ngd_k], "s-", lw=2, color="#2ca02c", label=rf"Natural GD Data Curvature $|K^{{({L})}}|$")
 axes[1].set_xlabel("Optimization Step")
-axes[1].set_ylabel("Mean Output Manifold Curvature $\\mathbb{E}[|K^{(5)}(x)|]$")
-axes[1].set_title("Induced Curvature Flow on Data Manifold $\\mathcal{M}_5$")
+axes[1].set_ylabel(rf"Mean Output Manifold Curvature $\mathbb{{E}}[|K^{{({L})}}(x)|]$")
+axes[1].set_title(rf"Induced Curvature Flow on Data Manifold $\mathcal{{M}}_{{{L}}}$")
 axes[1].legend()
 axes[1].grid(alpha=0.3)
 plt.tight_layout()
@@ -915,23 +1071,44 @@ def build_notebook_04() -> None:
 # Notebook 04: Classification via Purely Geometric Curvature Losses ($K < 0$ vs. $K > 0$)
 
 ## Research Objective
-Can a deep neural network learn to classify a non-linear dataset (`make_moons`) using **only differential geometric objects** in its loss function—without any cross-entropy, MSE, or coordinate-level logit supervision?
+Can a deep neural network learn to classify a non-linear dataset using **only differential geometric objects** in its loss function—without any cross-entropy, MSE, or coordinate-level logit supervision?
 
-We train the **`[2 -> 5 -> 10 -> 15 -> 10 -> 2]`** MLP from scratch by sculpting the intrinsic **Gaussian curvature** $K(x; \theta)$ of the final representation manifold $\mathcal{M}_5$ (equipped with the Graph Embedding Metric $\tilde{g}^{(5)}_{ij}(x) = \delta_{ij} + ((J^{(5)}(x))^T J^{(5)}(x))_{ij}$):
+We train our configured MLP from scratch by sculpting the intrinsic **Gaussian curvature** $K(x; \theta)$ of the final representation manifold $\mathcal{M}_L$ (equipped with the Graph Embedding Metric $\tilde{g}^{(L)}_{ij}(x) = \delta_{ij} + ((J^{(L)}(x))^T J^{(L)}(x))_{ij}$):
 - **Class $0$ ($y = 0, s = -1$)**: Driven into regions of **negative Gaussian curvature** ($K(x) \le -\tau < 0$, hyperbolic saddle geometry).
 - **Class $1$ ($y = 1, s = +1$)**: Driven into regions of **positive Gaussian curvature** ($K(x) \ge +\tau > 0$, spherical/elliptic dome geometry).
 
 ### Purely Geometric Loss Function
-$$\mathcal{L}_{\text{geom}}(\theta) = \frac{1}{N}\sum_{n=1}^N \mathrm{softplus}_\beta\!\Big(\tau - (2y_n - 1)\, K_{\text{clip}}(x_n; \theta)\Big) + \lambda_{\text{vol}} \frac{1}{N}\sum_{n=1}^N \Big(\log \det \tilde{g}^{(5)}(x_n; \theta)\Big)^2 + \lambda_{\text{iso}} \frac{1}{N}\sum_{n=1}^N \|\tilde{g}^{(5)}(x_n; \theta) - I_2\|_F^2$$
+$$\mathcal{L}_{\text{geom}}(\theta) = \frac{1}{N}\sum_{n=1}^N \mathrm{softplus}_\beta\!\Big(\tau - (2y_n - 1)\, K_{\text{clip}}(x_n; \theta)\Big) + \lambda_{\text{vol}} \frac{1}{N}\sum_{n=1}^N \Big(\log \det \tilde{g}^{(L)}(x_n; \theta)\Big)^2 + \lambda_{\text{iso}} \frac{1}{N}\sum_{n=1}^N \|\tilde{g}^{(L)}(x_n; \theta) - I_2\|_F^2$$
 
-- **Requires 3rd-Order Automatic Differentiation**: Since $K(x; \theta)$ depends on $\partial_x^2 g_{ij}(x; \theta)$ (2nd spatial derivatives of $\Phi^{(5)}_\theta$), computing $\nabla_\theta \mathcal{L}_{\text{geom}}(\theta)$ backpropagates through 3rd-order mixed spatio-parametric derivatives $\frac{\partial^3 \Phi^{(5)}_\theta(x)}{\partial \theta \partial x^i \partial x^j}$.
-- **Purely Geometric Inference Rule**: At test time, any point $x^*$ is classified strictly by the sign of the local manifold curvature:
-  $$\hat{y}(x^*) = \mathbb{I}\big[ K(x^*; \theta) > 0 \big]$$
+- **Requires 3rd-Order Automatic Differentiation**: Computing $\nabla_\theta \mathcal{L}_{\text{geom}}(\theta)$ backpropagates through 3rd-order mixed spatio-parametric derivatives $\frac{\partial^3 \Phi^{(L)}_\theta(x)}{\partial \theta \partial x^i \partial x^j}$.
+- **Purely Geometric Inference Rule**: At test time, any point $x^*$ is classified strictly by local manifold curvature ($\hat{y}(x^*) = \mathbb{I}[K(x^*; \theta) > 0]$ for $C=2$).
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
+# =============================================================================
+# USER CONFIGURATION
+# =============================================================================
+# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
+#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
+DATASET_NAME = "moons"
+N_CLASSES = 2                  # Number of classes (defaults to 2)
+DATASET_PARAMS = {
+    "n_train": 220,
+    "n_test": 120,
+    "noise": 0.10,
+    "seed": 42,
+}
+
+# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
+LAYER_DIMS = [2, 5, 10, 15, 10, 2]
+
+# 3. Activation Functions for Hidden Layers and Output Layer
+HIDDEN_ACTIVATION = "tanh"
+OUTPUT_ACTIVATION = "identity"
+# =============================================================================
+
 import sys
 from pathlib import Path
 for p in [Path.cwd(), Path.cwd().parent]:
@@ -945,28 +1122,46 @@ import matplotlib.pyplot as plt
 
 from src.geometry import (
     MoonsMLP,
-    get_moons_dataset,
+    get_synthetic_dataset,
     make_evaluation_grid,
     compute_layer_geometry,
     curvature_margin_loss,
+    scalar_geometric_predict,
 )
 
-X_train, y_train, X_test, y_test = get_moons_dataset(n_train=220, n_test=120, noise=0.10, seed=42)
+CLASS_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
+
+X_train, y_train, X_test, y_test = get_synthetic_dataset(
+    dataset_name=DATASET_NAME,
+    n_classes=N_CLASSES,
+    input_dim=LAYER_DIMS[0],
+    **DATASET_PARAMS,
+)
 xx, yy, grid_pts = make_evaluation_grid(X_train, n_grid=28, padding=0.45)
-print(f"Loaded make_moons | Train: {X_train.shape[0]} pts | Test: {X_test.shape[0]} pts")
+print(
+    f"Loaded {DATASET_NAME} (classes={N_CLASSES}) | Train: {X_train.shape[0]} pts | Test: {X_test.shape[0]} pts | "
+    f"MLP: {LAYER_DIMS} (hidden={HIDDEN_ACTIVATION}, out={OUTPUT_ACTIVATION})"
+)
 """,
         },
         {
             "type": "markdown",
             "source": r"""
 ## 1. End-to-End 3rd-Order Autodiff Training with Purely Geometric Curvature Loss
-We optimize $\mathcal{L}_{\text{geom}}(\theta)$ for 90 epochs with Adam (`lr=0.025`) and margin $\tau = 0.40$, tracking the separation of Gaussian curvature between Class $0$ ($K < 0$) and Class $1$ ($K > 0$).
+We optimize $\mathcal{L}_{\text{geom}}(\theta)$ for 90 epochs with Adam (`lr=0.025`) and margin $\tau = 0.40$, tracking the separation of Gaussian curvature across classes.
 """,
         },
         {
             "type": "code",
-            "source": """
-geom_model = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=7)
+            "source": r"""
+geom_model = MoonsMLP(
+    layer_dims=LAYER_DIMS,
+    activation=HIDDEN_ACTIVATION,
+    output_activation=OUTPUT_ACTIVATION,
+    seed=7,
+)
+L = geom_model.num_layers
+MARGIN_CURV = 0.40
 optimizer = torch.optim.Adam(geom_model.parameters(), lr=0.025)
 
 hist = {
@@ -982,16 +1177,17 @@ t0 = time.time()
 for epoch in range(1, 91):
     optimizer.zero_grad()
     params = dict(geom_model.named_parameters())
-    geom_tr = compute_layer_geometry(geom_model, X_train, layer_idx=5, metric_mode="graph", params=params)
+    geom_tr = compute_layer_geometry(geom_model, X_train, layer_idx=L, metric_mode="graph", params=params)
     loss, metrics = curvature_margin_loss(
         geom_tr["K"],
         y_train,
         geom_tr["g"],
-        margin=0.40,
+        margin=MARGIN_CURV,
         beta_hinge=4.0,
         lambda_vol=0.02,
         lambda_iso=0.005,
         k_clip=10.0,
+        n_classes=N_CLASSES,
     )
     loss.backward()
     torch.nn.utils.clip_grad_norm_(geom_model.parameters(), max_norm=5.0)
@@ -999,8 +1195,9 @@ for epoch in range(1, 91):
 
     if epoch == 1 or epoch % 5 == 0:
         with torch.no_grad():
-            geom_te = compute_layer_geometry(geom_model, X_test, layer_idx=5, metric_mode="graph")
-            te_acc = ((geom_te["K"] > 0.0).long() == y_test).float().mean().item()
+            geom_te = compute_layer_geometry(geom_model, X_test, layer_idx=L, metric_mode="graph")
+            preds_te = scalar_geometric_predict(geom_te["K"], n_classes=N_CLASSES, margin=MARGIN_CURV)
+            te_acc = (preds_te == y_test).float().mean().item()
         hist["epoch"].append(epoch)
         hist["loss"].append(metrics["loss_total"])
         hist["train_acc"].append(metrics["geom_acc"])
@@ -1011,27 +1208,27 @@ for epoch in range(1, 91):
     if epoch in [1, 20, 45, 90]:
         print(
             f"Epoch {epoch:3d} ({time.time()-t0:4.1f}s) | Geom Loss: {metrics['loss_total']:.4f} | "
-            f"Train Acc (K>0): {metrics['geom_acc']*100:5.1f}% | Test Acc (K>0): {hist['test_acc'][-1]*100:5.1f}% | "
+            f"Train Acc: {metrics['geom_acc']*100:5.1f}% | Test Acc: {hist['test_acc'][-1]*100:5.1f}% | "
             f"E[K|y=0]: {metrics['mean_K_class0']:+6.3f} | E[K|y=1]: {metrics['mean_K_class1']:+6.3f}"
         )
 
 fig, axes = plt.subplots(1, 2, figsize=(12, 4.2))
 axes[0].plot(hist["epoch"], hist["loss"], lw=2, color="#9467bd", label="Geometric Curvature Loss")
-axes[0].plot(hist["epoch"], hist["train_acc"], lw=2, color="#1f77b4", ls="--", label="Train Acc $\\mathbb{I}[K(x)>0]$")
-axes[0].plot(hist["epoch"], hist["test_acc"], lw=2.2, color="#2ca02c", label="Test Acc $\\mathbb{I}[K(x)>0]$")
+axes[0].plot(hist["epoch"], hist["train_acc"], lw=2, color="#1f77b4", ls="--", label="Train Acc")
+axes[0].plot(hist["epoch"], hist["test_acc"], lw=2.2, color="#2ca02c", label="Test Acc")
 axes[0].set_xlabel("Training Epoch")
 axes[0].set_ylabel("Loss / Accuracy")
 axes[0].set_title("Purely Geometric Curvature Training Convergence")
 axes[0].legend()
 axes[0].grid(alpha=0.3)
 
-axes[1].plot(hist["epoch"], hist["K_c0"], lw=2.2, color="#1f77b4", label="Class 0 Mean Curvature $\\mathbb{E}[K(x) \\mid y=0]$")
-axes[1].plot(hist["epoch"], hist["K_c1"], lw=2.2, color="#d62728", label="Class 1 Mean Curvature $\\mathbb{E}[K(x) \\mid y=1]$")
+axes[1].plot(hist["epoch"], hist["K_c0"], lw=2.2, color="#1f77b4", label=r"Class 0 Mean Curvature $\mathbb{E}[K(x) \mid y=0]$")
+axes[1].plot(hist["epoch"], hist["K_c1"], lw=2.2, color="#d62728", label=r"Class 1 Mean Curvature $\mathbb{E}[K(x) \mid y=1]$")
 axes[1].axhline(0.0, color="k", lw=1.2, ls=":")
-axes[1].axhline(-0.4, color="#1f77b4", lw=1.0, ls="--", alpha=0.6, label="Target Margin $-\\tau$")
-axes[1].axhline(+0.4, color="#d62728", lw=1.0, ls="--", alpha=0.6, label="Target Margin $+\\tau$")
+axes[1].axhline(-MARGIN_CURV, color="#1f77b4", lw=1.0, ls="--", alpha=0.6, label=r"Target Margin $-\tau$")
+axes[1].axhline(+MARGIN_CURV, color="#d62728", lw=1.0, ls="--", alpha=0.6, label=r"Target Margin $+\tau$")
 axes[1].set_xlabel("Training Epoch")
-axes[1].set_ylabel("Gaussian Curvature $K^{(5)}(x)$")
+axes[1].set_ylabel(rf"Gaussian Curvature $K^{{({L})}}(x)$")
 axes[1].set_title("Bifurcation of Manifold Curvature by Class")
 axes[1].legend()
 axes[1].grid(alpha=0.3)
@@ -1044,39 +1241,47 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 2. Learned 2D Gaussian Curvature Landscape & Zero-Curvature Decision Boundary ($K(x) = 0$)
-We evaluate $K^{(5)}(x)$ over the entire 2D grid and on the held-out test set. Notice how the **zero-curvature contour $K(x) = 0$** forms a smooth geometric boundary separating the hyperbolic negative-curvature valley containing Class $0$ from the positive-curvature elliptic dome containing Class $1$.
+We evaluate $K^{(L)}(x)$ over the entire 2D grid and on the held-out test set.
 """,
         },
         {
             "type": "code",
-            "source": """
-geom_grid = compute_layer_geometry(geom_model, grid_pts, layer_idx=5, metric_mode="graph")
+            "source": r"""
+geom_grid = compute_layer_geometry(geom_model, grid_pts, layer_idx=L, metric_mode="graph")
 K_grid = geom_grid["K"].detach().numpy().reshape(xx.shape)
 K_grid_sinh = np.arcsinh(K_grid)
 vmax = max(np.percentile(np.abs(K_grid_sinh), 96), 0.5)
 
-geom_test = compute_layer_geometry(geom_model, X_test, layer_idx=5, metric_mode="graph")
-K_test = geom_test["K"].detach().numpy()
+geom_test = compute_layer_geometry(geom_model, X_test, layer_idx=L, metric_mode="graph")
+K_test_t = geom_test["K"].detach()
+K_test = K_test_t.numpy()
 y_test_np = y_test.numpy()
+preds_test_np = scalar_geometric_predict(K_test_t, n_classes=N_CLASSES, margin=MARGIN_CURV).numpy()
+
+bnd_thresholds = [0.0] if N_CLASSES == 2 else list(2.0 * MARGIN_CURV * (np.arange(N_CLASSES - 1) + 0.5 - 0.5 * (N_CLASSES - 1)))
 
 fig, axes = plt.subplots(1, 2, figsize=(12.8, 4.6))
 cf = axes[0].contourf(xx, yy, K_grid_sinh, levels=25, cmap="RdBu_r", vmin=-vmax, vmax=vmax)
-axes[0].contour(xx, yy, K_grid, levels=[0.0], colors="k", linewidths=2.2)
-axes[0].scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", edgecolors="w", s=34, label="Test Class 0 (Target $K < 0$)")
-axes[0].scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", edgecolors="w", s=34, label="Test Class 1 (Target $K > 0$)")
-axes[0].set_title("Learned Curvature Field $\\mathrm{arcsinh}(K^{(5)}(x))$ & $K(x)=0$ Boundary")
+valid_bnds = [b for b in bnd_thresholds if K_grid.min() < b < K_grid.max()]
+if valid_bnds:
+    axes[0].contour(xx, yy, K_grid, levels=valid_bnds, colors="k", linewidths=2.2)
+for c in range(N_CLASSES):
+    mc = y_test == c
+    axes[0].scatter(X_test[mc, 0], X_test[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolors="w", s=34, label=f"Test Class {c}")
+axes[0].set_title(rf"Learned Curvature Field $\mathrm{{arcsinh}}(K^{{({L})}}(x))$ & Decision Boundary")
 axes[0].set_xlabel("$x^1$")
 axes[0].set_ylabel("$x^2$")
 axes[0].legend(loc="upper right")
-plt.colorbar(cf, ax=axes[0], label="$\\mathrm{arcsinh}(K^{(5)}(x))$")
+plt.colorbar(cf, ax=axes[0], label=rf"$\mathrm{{arcsinh}}(K^{{({L})}}(x))$")
 
 bins = np.linspace(np.percentile(K_test, 2) - 0.2, np.percentile(K_test, 98) + 0.2, 24)
-axes[1].hist(K_test[y_test_np == 0], bins=bins, alpha=0.75, color="#1f77b4", edgecolor="k", label="Test Class 0 ($K < 0$)")
-axes[1].hist(K_test[y_test_np == 1], bins=bins, alpha=0.75, color="#d62728", edgecolor="k", label="Test Class 1 ($K > 0$)")
-axes[1].axvline(0.0, color="k", lw=2.0, ls="--", label="Decision Threshold $K = 0$")
-axes[1].set_xlabel("Intrinsic Gaussian Curvature $K^{(5)}(x)$")
+for c in range(N_CLASSES):
+    axes[1].hist(K_test[y_test_np == c], bins=bins, alpha=0.72, color=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolor="k", label=f"Test Class {c}")
+for b_idx, b_val in enumerate(bnd_thresholds):
+    axes[1].axvline(b_val, color="k", lw=2.0, ls="--", label="Decision Threshold" if b_idx == 0 else None)
+axes[1].set_xlabel(rf"Intrinsic Gaussian Curvature $K^{{({L})}}(x)$")
 axes[1].set_ylabel("Test Sample Count")
-axes[1].set_title(f"Held-Out Test Set Curvature Distribution (Acc = {((K_test > 0) == y_test_np).mean()*100:.1f}%)")
+axes[1].set_title(f"Held-Out Test Set Curvature Distribution (Acc = {(preds_test_np == y_test_np).mean()*100:.1f}%)")
 axes[1].legend()
 axes[1].grid(alpha=0.3)
 
@@ -1088,12 +1293,12 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 3. 3D Visualization of the Learned Output Surface Coloured by Intrinsic Gaussian Curvature $K(x)$
-We visualize the learned graph surface $(x^1, x^2, z^1(x))$ in $\mathbb{R}^3$ coloured by its exact Gaussian curvature $K^{(5)}(x)$, illustrating how the neural network bends the manifold into a saddle ($K < 0$, blue) over Class $0$ and a dome ($K > 0$, red) over Class $1$.
+We visualize the learned graph surface $(x^1, x^2, z^1(x))$ in $\mathbb{R}^3$ coloured by its exact Gaussian curvature $K^{(L)}(x)$, illustrating how the neural network bends the manifold into hyperbolic saddles ($K < 0$, blue) vs. elliptic domes ($K > 0$, red).
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
 from matplotlib import cm
 from matplotlib.colors import Normalize
 
@@ -1110,18 +1315,19 @@ ax = fig.add_subplot(111, projection="3d")
 surf = ax.plot_surface(xx, yy, z1_surf, facecolors=facecolors, rstride=1, cstride=1, alpha=0.82, antialiased=True, shade=False)
 
 x_te_np = X_test.numpy()
-ax.scatter(x_te_np[y_test_np == 0, 0], x_te_np[y_test_np == 0, 1], z_te[y_test_np == 0, 0] + 0.08, c="#1f77b4", edgecolors="k", s=35, label="Class 0 ($K < 0$ Saddle)")
-ax.scatter(x_te_np[y_test_np == 1, 0], x_te_np[y_test_np == 1, 1], z_te[y_test_np == 1, 0] + 0.08, c="#d62728", edgecolors="k", s=35, label="Class 1 ($K > 0$ Dome)")
+for c in range(N_CLASSES):
+    mc = y_test_np == c
+    ax.scatter(x_te_np[mc, 0], x_te_np[mc, 1], z_te[mc, 0] + 0.08, c=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolors="k", s=35, label=f"Class {c}")
 
 ax.set_xlabel("$x^1$")
 ax.set_ylabel("$x^2$")
 ax.set_zlabel("Output Coordinate $z^1(x)$")
-ax.set_title("3D Immersed Data Manifold $(x^1, x^2, z^1(x))$ Coloured by Gaussian Curvature $K^{(5)}(x)$")
+ax.set_title(rf"3D Immersed Data Manifold $(x^1, x^2, z^1(x))$ Coloured by Gaussian Curvature $K^{{({L})}}(x)$")
 ax.view_init(elev=28, azim=-55)
 ax.legend(loc="upper left")
 mappable = cm.ScalarMappable(cmap=cm.RdBu_r, norm=norm)
 mappable.set_array(K_grid_sinh)
-plt.colorbar(mappable, ax=ax, shrink=0.62, pad=0.08, label="$\\mathrm{arcsinh}(K^{(5)}(x))$")
+plt.colorbar(mappable, ax=ax, shrink=0.62, pad=0.08, label=rf"$\mathrm{{arcsinh}}(K^{{({L})}}(x))$")
 plt.tight_layout()
 plt.show()
 """,
@@ -1138,22 +1344,44 @@ def build_notebook_05() -> None:
 # Notebook 05: Comparative Analysis of Purely Geometric Losses, Layerwise Curvature Profiles, and Parameter Geometry
 
 ## Research Objective
-We synthesize our investigation by comparing **three purely geometric training objectives** against the **standard Cross-Entropy baseline** on the `[2 -> 5 -> 10 -> 15 -> 10 -> 2]` MLP:
+We synthesize our investigation by comparing **three purely geometric training objectives** against the **standard Cross-Entropy baseline** on the configured MLP:
 
 1. **Cross-Entropy Baseline**: $\mathcal{L}_{\text{CE}}(\theta) = -\frac{1}{N}\sum_n \log p_\theta(y_n | x_n)$ (coordinate/logit supervision).
 2. **Gaussian Curvature Margin Loss (2nd-Fundamental / Riemann Invariant)**:
-   Places Class $0$ in negative Gaussian curvature ($K^{(5)}(x) \le -\tau$) and Class $1$ in positive Gaussian curvature ($K^{(5)}(x) \ge +\tau$).
+   Separates classes by intrinsic Gaussian curvature $K^{(L)}(x)$.
 3. **Riemannian Volume-Element Contrastive Loss (Metric Determinant Invariant)**:
-   Places Class $0$ in volume-contracting regions ($\log\sqrt{\det g^{(5)}(x)} \le -\tau$) and Class $1$ in volume-expanding regions ($\log\sqrt{\det g^{(5)}(x)} \ge +\tau$).
+   Separates classes by local log-volume density $\log\sqrt{\det g^{(L)}(x)}$.
 4. **Metric Anisotropy / Polarization Loss (Metric Ratio Invariant)**:
-   Separates classes by directional metric stretching $\log(g^{(5)}_{11}(x) / g^{(5)}_{22}(x)) \lessgtr \pm \tau$.
+   Separates classes by directional metric stretching $\log(g^{(L)}_{11}(x) / g^{(L)}_{22}(x))$.
 
-Finally, we analyze the **back-reaction on the Parameter Manifold ($\Theta$)**: how training with purely geometric objectives on the data manifold reshapes the layerwise curvature profile $K^{(1 \dots 5)}$ and the $422 \times 422$ Parameter Manifold metric spectrum $G^{\Theta}_{\mu\nu}(\theta) = \mathbb{E}_x[(J_\theta z)^T (J_\theta z)]$.
+Finally, we analyze the **back-reaction on the Parameter Manifold ($\Theta$)**: how training with purely geometric objectives on the data manifold reshapes the layerwise curvature profile $K^{(1 \dots L)}$ and the $P \times P$ Parameter Manifold metric spectrum $G^{\Theta}_{\mu\nu}(\theta) = \mathbb{E}_x[(J_\theta z)^T (J_\theta z)]$.
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
+# =============================================================================
+# USER CONFIGURATION
+# =============================================================================
+# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
+#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
+DATASET_NAME = "moons"
+N_CLASSES = 2                  # Number of classes (defaults to 2)
+DATASET_PARAMS = {
+    "n_train": 220,
+    "n_test": 120,
+    "noise": 0.10,
+    "seed": 42,
+}
+
+# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
+LAYER_DIMS = [2, 5, 10, 15, 10, 2]
+
+# 3. Activation Functions for Hidden Layers and Output Layer
+HIDDEN_ACTIVATION = "tanh"
+OUTPUT_ACTIVATION = "identity"
+# =============================================================================
+
 import sys
 from pathlib import Path
 for p in [Path.cwd(), Path.cwd().parent]:
@@ -1168,17 +1396,31 @@ import matplotlib.pyplot as plt
 
 from src.geometry import (
     MoonsMLP,
-    get_moons_dataset,
+    get_synthetic_dataset,
     make_evaluation_grid,
     compute_layer_geometry,
     compute_layer_pullback_metric,
+    compute_metric_spectrum,
     curvature_margin_loss,
     volume_contrastive_loss,
     anisotropy_margin_loss,
+    scalar_geometric_predict,
 )
 
-X_train, y_train, X_test, y_test = get_moons_dataset(n_train=220, n_test=120, noise=0.10, seed=42)
+CE_LAYER_DIMS = [*LAYER_DIMS[:-1], max(LAYER_DIMS[-1], N_CLASSES)]
+CLASS_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
+
+X_train, y_train, X_test, y_test = get_synthetic_dataset(
+    dataset_name=DATASET_NAME,
+    n_classes=N_CLASSES,
+    input_dim=LAYER_DIMS[0],
+    **DATASET_PARAMS,
+)
 xx, yy, grid_pts = make_evaluation_grid(X_train, n_grid=26, padding=0.45)
+print(
+    f"Dataset: {DATASET_NAME} (classes={N_CLASSES}) | Train: {X_train.shape}, Test: {X_test.shape} | "
+    f"MLP: {LAYER_DIMS} (hidden={HIDDEN_ACTIVATION}, out={OUTPUT_ACTIVATION})"
+)
 """,
         },
         {
@@ -1189,9 +1431,9 @@ xx, yy, grid_pts = make_evaluation_grid(X_train, n_grid=26, padding=0.45)
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
 # 1. Cross-Entropy Baseline
-m_ce = MoonsMLP(activation="tanh", seed=7)
+m_ce = MoonsMLP(layer_dims=CE_LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
 opt_ce = torch.optim.Adam(m_ce.parameters(), lr=0.02)
 crit_ce = nn.CrossEntropyLoss()
 for _ in range(120):
@@ -1201,54 +1443,55 @@ for _ in range(120):
     opt_ce.step()
 ce_te_acc = (m_ce(X_test).argmax(-1) == y_test).float().mean().item()
 
-# 2. Purely Geometric Curvature Margin Loss (K < 0 vs K > 0)
-m_curv = MoonsMLP(activation="tanh", seed=7)
+# 2. Purely Geometric Curvature Margin Loss
+m_curv = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
+L = m_curv.num_layers
 opt_curv = torch.optim.Adam(m_curv.parameters(), lr=0.025)
 for _ in range(85):
     opt_curv.zero_grad()
     params = dict(m_curv.named_parameters())
-    g5 = compute_layer_geometry(m_curv, X_train, layer_idx=5, metric_mode="graph", params=params)
-    loss, _ = curvature_margin_loss(g5["K"], y_train, g5["g"], margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0)
+    gL = compute_layer_geometry(m_curv, X_train, layer_idx=L, metric_mode="graph", params=params)
+    loss, _ = curvature_margin_loss(gL["K"], y_train, gL["g"], margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0, n_classes=N_CLASSES)
     loss.backward()
     torch.nn.utils.clip_grad_norm_(m_curv.parameters(), 5.0)
     opt_curv.step()
-K_te = compute_layer_geometry(m_curv, X_test, layer_idx=5, metric_mode="graph")["K"]
-curv_te_acc = ((K_te > 0.0).long() == y_test).float().mean().item()
+K_te = compute_layer_geometry(m_curv, X_test, layer_idx=L, metric_mode="graph")["K"]
+curv_te_acc = (scalar_geometric_predict(K_te, n_classes=N_CLASSES, margin=0.40) == y_test).float().mean().item()
 
-# 3. Purely Geometric Volume-Element Contrastive Loss (log sqrt(det g) < 0 vs > 0)
-m_vol = MoonsMLP(activation="tanh", seed=7)
+# 3. Purely Geometric Volume-Element Contrastive Loss
+m_vol = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
 opt_vol = torch.optim.Adam(m_vol.parameters(), lr=0.02)
 for _ in range(100):
     opt_vol.zero_grad()
     params = dict(m_vol.named_parameters())
-    g5 = compute_layer_pullback_metric(m_vol, X_train, layer_idx=5, metric_mode="euclidean", eps=1e-6, params=params)
-    loss, _ = volume_contrastive_loss(g5, y_train, margin=0.60)
+    gL = compute_layer_pullback_metric(m_vol, X_train, layer_idx=L, metric_mode="euclidean", eps=1e-6, params=params)
+    loss, _ = volume_contrastive_loss(gL, y_train, margin=0.60, n_classes=N_CLASSES)
     loss.backward()
     opt_vol.step()
-g5_vol_te = compute_layer_pullback_metric(m_vol, X_test, layer_idx=5, metric_mode="euclidean", eps=1e-6)
-log_vol_te = 0.5 * torch.log(torch.clamp(torch.linalg.det(g5_vol_te), min=1e-8))
-vol_te_acc = ((log_vol_te > 0.0).long() == y_test).float().mean().item()
+gL_vol_te = compute_layer_pullback_metric(m_vol, X_test, layer_idx=L, metric_mode="euclidean", eps=1e-6)
+log_vol_te = 0.5 * torch.log(torch.clamp(torch.linalg.det(gL_vol_te), min=1e-8))
+vol_te_acc = (scalar_geometric_predict(log_vol_te, n_classes=N_CLASSES, margin=0.60) == y_test).float().mean().item()
 
-# 4. Purely Geometric Metric Anisotropy Loss (log(g11 / g22) < 0 vs > 0)
-m_aniso = MoonsMLP(activation="tanh", seed=7)
+# 4. Purely Geometric Metric Anisotropy Loss
+m_aniso = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
 opt_aniso = torch.optim.Adam(m_aniso.parameters(), lr=0.02)
 for _ in range(100):
     opt_aniso.zero_grad()
     params = dict(m_aniso.named_parameters())
-    g5 = compute_layer_pullback_metric(m_aniso, X_train, layer_idx=5, metric_mode="graph", params=params)
-    loss, _ = anisotropy_margin_loss(g5, y_train, margin=0.45)
+    gL = compute_layer_pullback_metric(m_aniso, X_train, layer_idx=L, metric_mode="graph", params=params)
+    loss, _ = anisotropy_margin_loss(gL, y_train, margin=0.45, n_classes=N_CLASSES)
     loss.backward()
     opt_aniso.step()
-g5_aniso_te = compute_layer_pullback_metric(m_aniso, X_test, layer_idx=5, metric_mode="graph")
-aniso_ratio_te = torch.log(g5_aniso_te[:, 0, 0] / g5_aniso_te[:, 1, 1])
-aniso_te_acc = ((aniso_ratio_te > 0.0).long() == y_test).float().mean().item()
+gL_aniso_te = compute_layer_pullback_metric(m_aniso, X_test, layer_idx=L, metric_mode="graph")
+aniso_ratio_te = torch.log(gL_aniso_te[:, 0, 0] / gL_aniso_te[:, 1, 1])
+aniso_te_acc = (scalar_geometric_predict(aniso_ratio_te, n_classes=N_CLASSES, margin=0.45) == y_test).float().mean().item()
 
 print(f"{'Training Objective':<44} {'Decision Criterion':<30} {'Test Accuracy':<15}")
 print("-" * 90)
-print(f"{'1. Cross-Entropy Baseline':<44} {'z_1(x) > z_0(x)':<30} {ce_te_acc*100:6.2f}%")
-print(f"{'2. Geometric Curvature Margin Loss':<44} {'K^(5)(x) > 0':<30} {curv_te_acc*100:6.2f}%")
-print(f"{'3. Geometric Volume-Element Loss':<44} {'log sqrt(det g^(5)(x)) > 0':<30} {vol_te_acc*100:6.2f}%")
-print(f"{'4. Geometric Metric Anisotropy Loss':<44} {'log(g_11^(5) / g_22^(5)) > 0':<30} {aniso_te_acc*100:6.2f}%")
+print(f"{'1. Cross-Entropy Baseline':<44} {'argmax_c z_c(x)':<30} {ce_te_acc*100:6.2f}%")
+print(f"{'2. Geometric Curvature Margin Loss':<44} {f'K^({L})(x) bands':<30} {curv_te_acc*100:6.2f}%")
+print(f"{'3. Geometric Volume-Element Loss':<44} {f'log sqrt(det g^({L})(x))':<30} {vol_te_acc*100:6.2f}%")
+print(f"{'4. Geometric Metric Anisotropy Loss':<44} {f'log(g_11^({L}) / g_22^({L}))':<30} {aniso_te_acc*100:6.2f}%")
 """,
         },
         {
@@ -1259,32 +1502,38 @@ print(f"{'4. Geometric Metric Anisotropy Loss':<44} {'log(g_11^(5) / g_22^(5)) >
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
 with torch.no_grad():
-    f_ce = (m_ce(grid_pts)[:, 1] - m_ce(grid_pts)[:, 0]).numpy().reshape(xx.shape)
+    logits_grid = m_ce(grid_pts)
+    if N_CLASSES == 2:
+        f_ce = (logits_grid[:, 1] - logits_grid[:, 0]).numpy().reshape(xx.shape)
+    else:
+        f_ce = (logits_grid.argmax(dim=-1).float() - 0.5 * (N_CLASSES - 1)).numpy().reshape(xx.shape)
 
-f_curv = np.arcsinh(compute_layer_geometry(m_curv, grid_pts, layer_idx=5, metric_mode="graph")["K"].detach().numpy().reshape(xx.shape))
+f_curv = np.arcsinh(compute_layer_geometry(m_curv, grid_pts, layer_idx=L, metric_mode="graph")["K"].detach().numpy().reshape(xx.shape))
 
-g_vol_grid = compute_layer_pullback_metric(m_vol, grid_pts, layer_idx=5, metric_mode="euclidean", eps=1e-6)
+g_vol_grid = compute_layer_pullback_metric(m_vol, grid_pts, layer_idx=L, metric_mode="euclidean", eps=1e-6)
 f_vol = (0.5 * torch.log(torch.clamp(torch.linalg.det(g_vol_grid), min=1e-8))).detach().numpy().reshape(xx.shape)
 
-g_aniso_grid = compute_layer_pullback_metric(m_aniso, grid_pts, layer_idx=5, metric_mode="graph")
+g_aniso_grid = compute_layer_pullback_metric(m_aniso, grid_pts, layer_idx=L, metric_mode="graph")
 f_aniso = torch.log(g_aniso_grid[:, 0, 0] / g_aniso_grid[:, 1, 1]).detach().numpy().reshape(xx.shape)
 
 fields = [
-    (f_ce, f"Cross-Entropy Logit Gap\\nTest Acc: {ce_te_acc*100:.1f}%"),
-    (f_curv, f"Gaussian Curvature $\\mathrm{{arcsinh}}(K)$\\nTest Acc: {curv_te_acc*100:.1f}%"),
-    (f_vol, f"Log Volume $\\log\\sqrt{{\\det g}}$\\nTest Acc: {vol_te_acc*100:.1f}%"),
-    (f_aniso, f"Metric Anisotropy $\\log(g_{{11}}/g_{{22}})$\\nTest Acc: {aniso_te_acc*100:.1f}%"),
+    (f_ce, f"Cross-Entropy Logit Gap\nTest Acc: {ce_te_acc*100:.1f}%"),
+    (f_curv, "Gaussian Curvature " + r"$\mathrm{arcsinh}(K)$" + f"\nTest Acc: {curv_te_acc*100:.1f}%"),
+    (f_vol, "Log Volume " + r"$\log\sqrt{\det g}$" + f"\nTest Acc: {vol_te_acc*100:.1f}%"),
+    (f_aniso, "Metric Anisotropy " + r"$\log(g_{11}/g_{22})$" + f"\nTest Acc: {aniso_te_acc*100:.1f}%"),
 ]
 
 fig, axes = plt.subplots(1, 4, figsize=(16.5, 3.9), sharex=True, sharey=True)
 for ax, (fld, title) in zip(axes, fields):
     vm = max(np.percentile(np.abs(fld), 95), 0.2)
     im = ax.contourf(xx, yy, fld, levels=22, cmap="RdBu_r", vmin=-vm, vmax=vm)
-    ax.contour(xx, yy, fld, levels=[0.0], colors="k", linewidths=2.0)
-    ax.scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", edgecolors="w", s=20)
-    ax.scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", edgecolors="w", s=20)
+    if fld.min() < 0.0 < fld.max():
+        ax.contour(xx, yy, fld, levels=[0.0], colors="k", linewidths=2.0)
+    for c in range(N_CLASSES):
+        mc = y_test == c
+        ax.scatter(X_test[mc, 0], X_test[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolors="w", s=20)
     ax.set_title(title)
     ax.set_xlabel("$x^1$")
     plt.colorbar(im, ax=ax, fraction=0.046)
@@ -1297,14 +1546,14 @@ plt.show()
         {
             "type": "markdown",
             "source": r"""
-## 3. Layerwise Curvature Profiles & Back-Reaction on the $422 \times 422$ Parameter Manifold Metric
-Finally, we compare how the four training objectives distribute curvature across the intermediate hidden layers $\ell \in \{1, 2, 3, 4, 5\}$ and how they shape the eigenspectrum of the $422 \times 422$ Generalized Gauss-Newton / Output Pullback Metric on the parameter manifold $\Theta$:
-$$G^\Theta_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}} \left[ \sum_{a=1}^2 \frac{\partial z^a(x; \theta)}{\partial \theta^\mu} \frac{\partial z^a(x; \theta)}{\partial \theta^\nu} \right]$$
+## 3. Layerwise Curvature Profiles & Back-Reaction on the $P \times P$ Parameter Manifold Metric
+Finally, we compare how the four training objectives distribute curvature across layers $\ell \in \{1, \dots, L\}$ and how they shape the eigenspectrum of the $P \times P$ Generalized Gauss-Newton / Output Pullback Metric on the parameter manifold $\Theta$:
+$$G^\Theta_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}} \left[ \sum_{a=1}^{d_L} \frac{\partial z^a(x; \theta)}{\partial \theta^\mu} \frac{\partial z^a(x; \theta)}{\partial \theta^\nu} \right]$$
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
 def compute_param_pullback_spectrum(model: MoonsMLP, X: torch.Tensor) -> np.ndarray:
     params = {k: v.detach() for k, v in model.named_parameters()}
     buffers = dict(model.named_buffers())
@@ -1315,7 +1564,7 @@ def compute_param_pullback_spectrum(model: MoonsMLP, X: torch.Tensor) -> np.ndar
 
     J_dict = vmap(jacrev(z_fn, argnums=0), in_dims=(None, 0))(params, X)
     N = X.shape[0]
-    J_flat = torch.cat([J_dict[k].reshape(N * 2, -1) for k in keys], dim=-1)
+    J_flat = torch.cat([J_dict[k].reshape(-1, params[k].numel()) for k in keys], dim=-1)
     G_theta = (J_flat.T @ J_flat) / float(N)
     evals = torch.linalg.eigvalsh(G_theta).flip(0).clamp(min=1e-10).detach().numpy()
     return evals
@@ -1327,36 +1576,35 @@ models_dict = {
     "Metric Anisotropy Loss": (m_aniso, "#ff7f0e"),
 }
 
-layers_list = [1, 2, 3, 4, 5]
+layers_list = list(range(1, L + 1))
+P_geom = sum(p.numel() for p in m_curv.parameters())
 fig, axes = plt.subplots(1, 2, figsize=(13, 4.4))
 
 for label, (mdl, col) in models_dict.items():
-    # Layerwise signed curvature gap E[K|y=1] - E[K|y=0]
     k_gaps = []
     for l_idx in layers_list:
-        mode = "graph" if l_idx == 5 else "euclidean"
+        mode = "graph" if mdl.layer_dims[l_idx] <= 2 else "euclidean"
         K_l = compute_layer_geometry(mdl, X_test, layer_idx=l_idx, metric_mode=mode)["K"].detach()
-        gap = (torch.arcsinh(K_l[y_test == 1]).mean() - torch.arcsinh(K_l[y_test == 0]).mean()).item()
+        gap = (torch.arcsinh(K_l[y_test == (N_CLASSES - 1)]).mean() - torch.arcsinh(K_l[y_test == 0]).mean()).item()
         k_gaps.append(gap)
     axes[0].plot(layers_list, k_gaps, "o-", lw=2, color=col, label=label)
 
-    # Parameter manifold metric spectrum
     evals_theta = compute_param_pullback_spectrum(mdl, X_train[:120])
     axes[1].plot(range(1, len(evals_theta) + 1), evals_theta, lw=2, color=col, label=label)
 
 axes[0].axhline(0.0, color="k", lw=1, ls=":")
 axes[0].set_xticks(layers_list)
-axes[0].set_xticklabels([f"L{l} (d={m_ce.layer_dims[l]})" for l in layers_list])
-axes[0].set_ylabel("Signed Curvature Separation $\\Delta \\mathrm{arcsinh}(K^{(\\ell)})$")
-axes[0].set_title("Layerwise Class Curvature Separation ($y=1$ vs $y=0$)")
+axes[0].set_xticklabels([f"L{l} (d={m_curv.layer_dims[l]})" for l in layers_list])
+axes[0].set_ylabel(r"Signed Curvature Separation $\Delta \mathrm{arcsinh}(K^{(\ell)})$")
+axes[0].set_title(f"Layerwise Class Curvature Separation ($y={N_CLASSES - 1}$ vs $y=0$)")
 axes[0].legend()
 axes[0].grid(alpha=0.3)
 
 axes[1].set_xscale("log")
 axes[1].set_yscale("log")
-axes[1].set_xlabel("Parameter Metric Eigenvalue Index $k$ ($P = 422$)")
-axes[1].set_ylabel("Eigenvalue $\\lambda_k(G^\\Theta(\\theta))$")
-axes[1].set_title("Induced 422x422 Parameter Manifold Metric Spectrum")
+axes[1].set_xlabel(f"Parameter Metric Eigenvalue Index $k$ ($P = {P_geom}$)")
+axes[1].set_ylabel(r"Eigenvalue $\lambda_k(G^\Theta(\theta))$")
+axes[1].set_title(f"Induced {P_geom}x{P_geom} Parameter Manifold Metric Spectrum")
 axes[1].legend()
 axes[1].grid(alpha=0.3)
 
@@ -1369,22 +1617,18 @@ plt.show()
             "source": r"""
 ## 4. Layerwise Log Volume Profiles ($\log\sqrt{\det g^{(\ell)}(x)}$)
 
-Next, we examine how each of the four training paradigms transforms the **local Riemannian log-volume density** across network depth $\ell \in \{1, 2, 3, 4, 5\}$:
+Next, we examine how each of the four training paradigms transforms the **local Riemannian log-volume density** across network depth $\ell \in \{1, \dots, L\}$:
 $$\log \rho_{\text{vol}}^{(\ell)}(x; \theta) = \log\sqrt{\det g^{(\ell)}(x; \theta)} = \frac{1}{2}\log \det g^{(\ell)}(x; \theta)$$
-
-We track both:
-1. **Per-Class Layerwise Log-Volume Trajectories**: $\mathbb{E}\big[\log\sqrt{\det g^{(\ell)}(x)} \;\big|\; y = c\big]$ for Class $0$ ($c=0$, dashed) and Class $1$ ($c=1$, solid) across the dimensional expansion phase ($2 \to 5 \to 10 \to 15$) and contraction phase ($15 \to 10 \to 2$).
-2. **Signed Layerwise Log-Volume Class Separation**:
-   $$\Delta \log\sqrt{\det g^{(\ell)}} = \mathbb{E}\big[\log\sqrt{\det g^{(\ell)}(x)} \;\big|\; y = 1\big] - \mathbb{E}\big[\log\sqrt{\det g^{(\ell)}(x)} \;\big|\; y = 0\big]$$
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
 fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.5))
 
-print(f"{'Method':<34} | {'L1 Gap':>8} {'L2 Gap':>8} {'L3 Gap':>8} {'L4 Gap':>8} {'L5 Gap':>8}")
-print("-" * 86)
+hdr_cols = " ".join(f"{f'L{l} Gap':>8}" for l in layers_list)
+print(f"{'Method':<34} | {hdr_cols}")
+print("-" * (37 + 9 * len(layers_list)))
 
 for label, (mdl, col) in models_dict.items():
     vol_c0_means, vol_c1_means, vol_gaps = [], [], []
@@ -1392,33 +1636,31 @@ for label, (mdl, col) in models_dict.items():
         g_l = compute_layer_pullback_metric(mdl, X_test, layer_idx=l_idx, metric_mode="euclidean", eps=1e-6).detach()
         log_vol_l = 0.5 * torch.log(torch.clamp(torch.linalg.det(g_l), min=1e-8))
         m0 = log_vol_l[y_test == 0].mean().item()
-        m1 = log_vol_l[y_test == 1].mean().item()
+        m1 = log_vol_l[y_test == (N_CLASSES - 1)].mean().item()
         vol_c0_means.append(m0)
         vol_c1_means.append(m1)
         vol_gaps.append(m1 - m0)
 
-    print(f"{label:<34} | {vol_gaps[0]:+8.3f} {vol_gaps[1]:+8.3f} {vol_gaps[2]:+8.3f} {vol_gaps[3]:+8.3f} {vol_gaps[4]:+8.3f}")
+    vals_str = " ".join(f"{vg:+8.3f}" for vg in vol_gaps)
+    print(f"{label:<34} | {vals_str}")
 
-    # Panel 1: Per-class mean log-volume profiles (solid = Class 1, dashed = Class 0)
-    axes[0].plot(layers_list, vol_c1_means, "o-", lw=2.0, color=col, label=f"{label} (Class 1)")
+    axes[0].plot(layers_list, vol_c1_means, "o-", lw=2.0, color=col, label=f"{label} (Class {N_CLASSES - 1})")
     axes[0].plot(layers_list, vol_c0_means, "s--", lw=1.6, color=col, alpha=0.75, label=f"{label} (Class 0)")
-
-    # Panel 2: Signed class separation in log-volume density
     axes[1].plot(layers_list, vol_gaps, "o-", lw=2.2, color=col, label=label)
 
 axes[0].axhline(0.0, color="k", lw=1.0, ls=":")
 axes[0].set_xticks(layers_list)
-axes[0].set_xticklabels([f"L{l} (d={m_ce.layer_dims[l]})" for l in layers_list])
-axes[0].set_ylabel("Mean Log Volume $\\mathbb{E}[\\log\\sqrt{\\det g^{(\\ell)}(x)}]$")
-axes[0].set_title("Per-Class Layerwise Log-Volume Trajectories (Solid: y=1, Dashed: y=0)")
+axes[0].set_xticklabels([f"L{l} (d={m_curv.layer_dims[l]})" for l in layers_list])
+axes[0].set_ylabel(r"Mean Log Volume $\mathbb{E}[\log\sqrt{\det g^{(\ell)}(x)}]$")
+axes[0].set_title(f"Per-Class Layerwise Log-Volume Trajectories (Solid: y={N_CLASSES - 1}, Dashed: y=0)")
 axes[0].legend(fontsize=7.5, ncol=2)
 axes[0].grid(alpha=0.3)
 
 axes[1].axhline(0.0, color="k", lw=1.0, ls=":")
 axes[1].set_xticks(layers_list)
-axes[1].set_xticklabels([f"L{l} (d={m_ce.layer_dims[l]})" for l in layers_list])
-axes[1].set_ylabel("Signed Log-Volume Separation $\\Delta \\log\\sqrt{\\det g^{(\\ell)}}$")
-axes[1].set_title("Layerwise Class Log-Volume Separation ($y=1$ vs $y=0$)")
+axes[1].set_xticklabels([f"L{l} (d={m_curv.layer_dims[l]})" for l in layers_list])
+axes[1].set_ylabel(r"Signed Log-Volume Separation $\Delta \log\sqrt{\det g^{(\ell)}}$")
+axes[1].set_title(f"Layerwise Class Log-Volume Separation ($y={N_CLASSES - 1}$ vs $y=0$)")
 axes[1].legend(fontsize=8.5)
 axes[1].grid(alpha=0.3)
 
@@ -1432,23 +1674,17 @@ plt.show()
             "source": r"""
 ## 5. Layerwise Metric Anisotropy Profiles ($\log(g^{(\ell)}_{11}/g^{(\ell)}_{22})$ & Spectral Condition Number $\lambda_1^{(\ell)}/\lambda_2^{(\ell)}$)
 
-We now analyze how directional stretching and spectral anisotropy of the pullback metric tensor $g^{(\ell)}_{ij}(x; \theta)$ evolve across layers $\ell \in \{1, 2, 3, 4, 5\}$ under the four training objectives, examining two complementary anisotropy measures:
-1. **Directional Metric Polarization Separation**:
-   $$\Delta \log\!\left(\frac{g^{(\ell)}_{11}}{g^{(\ell)}_{22}}\right) = \mathbb{E}\!\left[\log\frac{g^{(\ell)}_{11}(x)}{g^{(\ell)}_{22}(x)} \;\Bigg|\; y = 1\right] - \mathbb{E}\!\left[\log\frac{g^{(\ell)}_{11}(x)}{g^{(\ell)}_{22}(x)} \;\Bigg|\; y = 0\right]$$
-   which quantifies how strongly each layer polarizes horizontal ($x^1$) versus vertical ($x^2$) metric dilation between Class $1$ and Class $0$.
-2. **Coordinate-Invariant Spectral Condition Number (Eigenvalue Anisotropy)**:
-   $$\mathbb{E}_{x}\!\left[\log_{10}\!\left(\frac{\lambda_{\max}(g^{(\ell)}(x))}{\lambda_{\min}(g^{(\ell)}(x))}\right)\right]$$
-   which measures how strongly each layer compresses tangent vectors along 1D foliation leaves relative to orthogonal directions (**Benfenati & Marta, 2023**).
+We analyze how directional stretching and spectral anisotropy of the pullback metric tensor $g^{(\ell)}_{ij}(x; \theta)$ evolve across layers $\ell \in \{1, \dots, L\}$ under the four training objectives.
 """,
         },
         {
             "type": "code",
-            "source": """
-from src.geometry import compute_metric_spectrum
-
+            "source": r"""
 fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.5))
+mid_idx = len(layers_list) // 2
+mid_l = layers_list[mid_idx]
 
-print(f"{'Method':<34} | {'L1 Aniso Gap':>12} {'L3 Aniso Gap':>12} {'L5 Aniso Gap':>12} | {'L5 log10(l1/l2)':>15}")
+print(f"{'Method':<34} | {'L1 Aniso Gap':>12} {f'L{mid_l} Aniso Gap':>12} {f'L{L} Aniso Gap':>12} | {f'L{L} log10(l1/l2)':>15}")
 print("-" * 94)
 
 for label, (mdl, col) in models_dict.items():
@@ -1456,32 +1692,29 @@ for label, (mdl, col) in models_dict.items():
     for l_idx in layers_list:
         g_graph = compute_layer_pullback_metric(mdl, X_test, layer_idx=l_idx, metric_mode="graph").detach()
         log_ratio = torch.log(torch.clamp(g_graph[:, 0, 0], min=1e-8) / torch.clamp(g_graph[:, 1, 1], min=1e-8))
-        gap = (log_ratio[y_test == 1].mean() - log_ratio[y_test == 0].mean()).item()
+        gap = (log_ratio[y_test == (N_CLASSES - 1)].mean() - log_ratio[y_test == 0].mean()).item()
         aniso_gaps.append(gap)
 
         g_eucl = compute_layer_pullback_metric(mdl, X_test, layer_idx=l_idx, metric_mode="euclidean", eps=1e-7).detach()
         _, _, cond = compute_metric_spectrum(g_eucl)
         log_conds.append(torch.log10(torch.clamp(cond, min=1.0)).mean().item())
 
-    print(f"{label:<34} | {aniso_gaps[0]:+12.3f} {aniso_gaps[2]:+12.3f} {aniso_gaps[4]:+12.3f} | {log_conds[4]:15.3f}")
+    print(f"{label:<34} | {aniso_gaps[0]:+12.3f} {aniso_gaps[mid_idx]:+12.3f} {aniso_gaps[-1]:+12.3f} | {log_conds[-1]:15.3f}")
 
-    # Panel 1: Layerwise directional anisotropy separation (y=1 vs y=0)
     axes[0].plot(layers_list, aniso_gaps, "o-", lw=2.2, color=col, label=label)
-
-    # Panel 2: Layerwise spectral condition number log10(lambda_1 / lambda_2)
     axes[1].plot(layers_list, log_conds, "s-", lw=2.2, color=col, label=label)
 
 axes[0].axhline(0.0, color="k", lw=1.0, ls=":")
 axes[0].set_xticks(layers_list)
-axes[0].set_xticklabels([f"L{l} (d={m_ce.layer_dims[l]})" for l in layers_list])
-axes[0].set_ylabel("Directional Polarization Gap $\\Delta \\log(g^{(\\ell)}_{11} / g^{(\\ell)}_{22})$")
-axes[0].set_title("Layerwise Class Directional Anisotropy Separation ($y=1$ vs $y=0$)")
+axes[0].set_xticklabels([f"L{l} (d={m_curv.layer_dims[l]})" for l in layers_list])
+axes[0].set_ylabel(r"Directional Polarization Gap $\Delta \log(g^{(\ell)}_{11} / g^{(\ell)}_{22})$")
+axes[0].set_title(f"Layerwise Class Directional Anisotropy Separation ($y={N_CLASSES - 1}$ vs $y=0$)")
 axes[0].legend(fontsize=8.5)
 axes[0].grid(alpha=0.3)
 
 axes[1].set_xticks(layers_list)
-axes[1].set_xticklabels([f"L{l} (d={m_ce.layer_dims[l]})" for l in layers_list])
-axes[1].set_ylabel("Mean Spectral Anisotropy $\\mathbb{E}[\\log_{10}(\\lambda_1^{(\\ell)} / \\lambda_2^{(\\ell)})]$")
+axes[1].set_xticklabels([f"L{l} (d={m_curv.layer_dims[l]})" for l in layers_list])
+axes[1].set_ylabel(r"Mean Spectral Anisotropy $\mathbb{E}[\log_{10}(\lambda_1^{(\ell)} / \lambda_2^{(\ell)})]$")
 axes[1].set_title("Layerwise Spectral Condition Number Across Depth")
 axes[1].legend(fontsize=8.5)
 axes[1].grid(alpha=0.3)
@@ -1504,16 +1737,11 @@ A critical practical distinction between the four training objectives is their *
 | **2. Gaussian Curvature Loss** | $2$nd-order ($\partial_l\partial_k g_{ij}(x; \theta)$) | **3rd-order** ($\nabla_\theta \partial_x^2 g_{ij}$) | Nested `vmap(jacrev(jacrev(jacrev)))` + backward |
 | **3. Volume-Element Loss** | $1$st-order ($J(x; \theta) = \partial_x z$) | **2nd-order** ($\nabla_\theta \partial_x z$) | `vmap(jacrev)` + backward |
 | **4. Metric Anisotropy Loss** | $1$st-order ($J(x; \theta) = \partial_x z$) | **2nd-order** ($\nabla_\theta \partial_x z$) | `vmap(jacrev)` + backward |
-
-Below we profile each method on the `[2 -> 5 -> 10 -> 15 -> 10 -> 2]` MLP ($N = 220$ training points) using `torch.profiler` (`profile_memory=True`) and autograd computation graph traversal to compare:
-1. **Step Latency (`ms / step`)** for a full forward + backward pass.
-2. **CPU Tensor Memory Allocated (`MB / step`)** during forward + backward execution.
-3. **Autograd Computation Graph Size (`# grad_fn nodes`)** retained in memory for backpropagation.
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
 import time
 from torch.profiler import profile, ProfilerActivity
 
@@ -1529,64 +1757,62 @@ def count_autograd_graph_nodes(grad_fn) -> int:
             stack.append(next_node)
     return len(visited)
 
-probe_net = MoonsMLP(activation="tanh", seed=7)
+probe_net_ce = MoonsMLP(layer_dims=CE_LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
+probe_net = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
 ce_loss_fn = nn.CrossEntropyLoss()
 
 def step_loss_ce():
-    return ce_loss_fn(probe_net(X_train), y_train)
+    return ce_loss_fn(probe_net_ce(X_train), y_train)
 
 def step_loss_curv():
     params = dict(probe_net.named_parameters())
-    g5 = compute_layer_geometry(probe_net, X_train, layer_idx=5, metric_mode="graph", params=params)
-    loss, _ = curvature_margin_loss(g5["K"], y_train, g5["g"], margin=0.40)
+    gL = compute_layer_geometry(probe_net, X_train, layer_idx=L, metric_mode="graph", params=params)
+    loss, _ = curvature_margin_loss(gL["K"], y_train, gL["g"], margin=0.40, n_classes=N_CLASSES)
     return loss
 
 def step_loss_vol():
     params = dict(probe_net.named_parameters())
-    g5 = compute_layer_pullback_metric(probe_net, X_train, layer_idx=5, metric_mode="euclidean", eps=1e-6, params=params)
-    loss, _ = volume_contrastive_loss(g5, y_train, margin=0.60)
+    gL = compute_layer_pullback_metric(probe_net, X_train, layer_idx=L, metric_mode="euclidean", eps=1e-6, params=params)
+    loss, _ = volume_contrastive_loss(gL, y_train, margin=0.60, n_classes=N_CLASSES)
     return loss
 
 def step_loss_aniso():
     params = dict(probe_net.named_parameters())
-    g5 = compute_layer_pullback_metric(probe_net, X_train, layer_idx=5, metric_mode="graph", params=params)
-    loss, _ = anisotropy_margin_loss(g5, y_train, margin=0.45)
+    gL = compute_layer_pullback_metric(probe_net, X_train, layer_idx=L, metric_mode="graph", params=params)
+    loss, _ = anisotropy_margin_loss(gL, y_train, margin=0.45, n_classes=N_CLASSES)
     return loss
 
-def benchmark_method(loss_builder, n_repeats: int = 15):
-    # Warmup & count autograd graph nodes
-    probe_net.zero_grad()
+def benchmark_method(loss_builder, net_ref, n_repeats: int = 15):
+    net_ref.zero_grad()
     loss_val = loss_builder()
     graph_nodes = count_autograd_graph_nodes(loss_val.grad_fn)
     loss_val.backward()
 
-    # Profile CPU memory allocation during a single forward + backward step
     with profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof:
-        probe_net.zero_grad()
+        net_ref.zero_grad()
         l_p = loss_builder()
         l_p.backward()
     mem_mb = sum(e.cpu_memory_usage for e in prof.key_averages() if e.cpu_memory_usage > 0) / (1024.0 * 1024.0)
 
-    # Measure forward + backward step latency
     t0 = time.perf_counter()
     for _ in range(n_repeats):
-        probe_net.zero_grad()
+        net_ref.zero_grad()
         l_t = loss_builder()
         l_t.backward()
     step_ms = (time.perf_counter() - t0) * 1000.0 / n_repeats
     return step_ms, mem_mb, graph_nodes
 
 method_specs = [
-    ("Cross-Entropy\\n(1st-Order)", step_loss_ce, ce_te_acc * 100.0, "#1f77b4"),
-    ("Volume-Element\\n(2nd-Order)", step_loss_vol, vol_te_acc * 100.0, "#2ca02c"),
-    ("Metric Anisotropy\\n(2nd-Order)", step_loss_aniso, aniso_te_acc * 100.0, "#ff7f0e"),
-    ("Gaussian Curvature\\n(3rd-Order)", step_loss_curv, curv_te_acc * 100.0, "#d62728"),
+    ("Cross-Entropy\n(1st-Order)", step_loss_ce, probe_net_ce, ce_te_acc * 100.0, "#1f77b4"),
+    ("Volume-Element\n(2nd-Order)", step_loss_vol, probe_net, vol_te_acc * 100.0, "#2ca02c"),
+    ("Metric Anisotropy\n(2nd-Order)", step_loss_aniso, probe_net, aniso_te_acc * 100.0, "#ff7f0e"),
+    ("Gaussian Curvature\n(3rd-Order)", step_loss_curv, probe_net, curv_te_acc * 100.0, "#d62728"),
 ]
 
 results = []
-for name, fn, acc_pct, col in method_specs:
-    ms, mb, nodes = benchmark_method(fn)
-    results.append({"name": name, "clean_name": name.replace("\\n", " "), "ms": ms, "mb": mb, "nodes": nodes, "acc": acc_pct, "color": col})
+for name, fn, net_r, acc_pct, col in method_specs:
+    ms, mb, nodes = benchmark_method(fn, net_r)
+    results.append({"name": name, "clean_name": name.replace("\n", " "), "ms": ms, "mb": mb, "nodes": nodes, "acc": acc_pct, "color": col})
 
 print(f"{'Method':<34} {'Latency (ms/step)':<20} {'Memory (MB/step)':<20} {'Autograd Nodes':<16} {'Test Acc':<10}")
 print("-" * 102)
@@ -1597,11 +1823,9 @@ names = [r["name"] for r in results]
 colors = [r["color"] for r in results]
 latencies = [r["ms"] for r in results]
 memories = [r["mb"] for r in results]
-node_counts = [r["nodes"] for r in results]
 
 fig, axes = plt.subplots(1, 3, figsize=(16.5, 4.6))
 
-# Panel 1: Step Latency (ms/step)
 bars0 = axes[0].bar(names, latencies, color=colors, edgecolor="k", alpha=0.88, width=0.58)
 axes[0].set_yscale("log")
 axes[0].set_ylabel("Forward + Backward Latency (ms / step, log scale)")
@@ -1611,7 +1835,6 @@ for b, val in zip(bars0, latencies):
     axes[0].text(b.get_x() + b.get_width() / 2, val * 1.15, f"{val:.2f} ms", ha="center", va="bottom", fontsize=9, fontweight="bold")
 axes[0].set_ylim(0.3, max(latencies) * 2.5)
 
-# Panel 2: Memory Footprint (MB/step)
 bars1 = axes[1].bar(names, memories, color=colors, edgecolor="k", alpha=0.88, width=0.58)
 axes[1].set_yscale("log")
 axes[1].set_ylabel("Step Tensor Memory Allocation (MB, log scale)")
@@ -1621,11 +1844,10 @@ for b, val in zip(bars1, memories):
     axes[1].text(b.get_x() + b.get_width() / 2, val * 1.18, f"{val:.2f} MB", ha="center", va="bottom", fontsize=9, fontweight="bold")
 axes[1].set_ylim(0.15, max(memories) * 3.0)
 
-# Panel 3: Autograd Graph Nodes vs. Latency & Memory Bubble Plot
 for r in results:
     bubble_size = max(np.sqrt(r["mb"]) * 55.0, 90.0)
     axes[2].scatter(r["ms"], r["mb"], s=bubble_size, color=r["color"], edgecolors="k", linewidth=1.5, alpha=0.85, label=f"{r['clean_name']} ({r['nodes']} nodes)")
-    axes[2].annotate(f"{r['nodes']} nodes\\n({r['acc']:.1f}% acc)", (r["ms"], r["mb"]), textcoords="offset points", xytext=(8, -6), fontsize=8.5)
+    axes[2].annotate(f"{r['nodes']} nodes\n({r['acc']:.1f}% acc)", (r["ms"], r["mb"]), textcoords="offset points", xytext=(8, -6), fontsize=8.5)
 
 axes[2].set_xscale("log")
 axes[2].set_yscale("log")
@@ -1647,64 +1869,51 @@ plt.show()
             "source": r"""
 ## 7. $3 \times 4$ Cross-Evaluation Matrix of Final-Layer Geometric Fields Across All Experiments
 
-Finally, we evaluate **all three differential-geometric measures** at the final layer ($\ell = 5$) across **all four trained networks** in the 2D input space $(x^1, x^2)$:
-- **Rows (Geometric Measures at Layer $\ell = 5$)**:
-  1. **Row 1 — Gaussian Curvature**: $\mathrm{arcsinh}\!\big(K^{(5)}(x)\big)$ (Graph metric $\tilde{g}^{(5)} = I_2 + (J^{(5)})^T J^{(5)}$; $0 = \text{flat}$).
-  2. **Row 2 — Log Volume Density**: $\log\sqrt{\det g^{(5)}(x)}$ (Euclidean pullback $g^{(5)} = (J^{(5)})^T J^{(5)}$; $0 = \text{equiareal}$).
-  3. **Row 3 — Metric Anisotropy**: $\log\!\big(g^{(5)}_{11}(x) / g^{(5)}_{22}(x)\big)$ (Directional metric ratio; $0 = \text{isotropic } g_{11}=g_{22}$).
-- **Columns (Training Experiments)**:
-  1. **Column 1**: Cross-Entropy Baseline
-  2. **Column 2**: Curvature Margin Loss ($K < 0$ vs. $K > 0$)
-  3. **Column 3**: Volume-Element Loss ($\log\sqrt{\det g} < 0$ vs. $> 0$)
-  4. **Column 4**: Metric Anisotropy Loss ($\log(g_{11}/g_{22}) < 0$ vs. $> 0$)
-
-All plots use the symmetric `RdBu_r` colormap centered at **$0.0$ (white)**, with the zero-level contour ($0.0$) drawn in black.
+Finally, we evaluate **all three differential-geometric measures** at the final layer ($\ell = L$) across **all four trained networks** in the 2D input space $(x^1, x^2)$.
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
 from matplotlib.colors import TwoSlopeNorm
 
 exp_columns = [
     ("Cross-Entropy Baseline", m_ce),
-    ("Curvature Loss (K < 0 vs K > 0)", m_curv),
+    ("Curvature Loss", m_curv),
     ("Volume-Element Loss", m_vol),
     ("Metric Anisotropy Loss", m_aniso),
 ]
 
 row_labels = [
-    "Gaussian Curvature\\n$\\mathrm{arcsinh}(K^{(5)}(x))$",
-    "Log Volume Density\\n$\\log\\sqrt{\\det g^{(5)}(x)}$",
-    "Metric Anisotropy\\n$\\log(g^{(5)}_{11}(x) / g^{(5)}_{22}(x))$",
+    "Gaussian Curvature\n" + rf"$\mathrm{{arcsinh}}(K^{{({L})}}(x))$",
+    "Log Volume Density\n" + rf"$\log\sqrt{{\det g^{{({L})}}(x)}}$",
+    "Metric Anisotropy\n" + rf"$\log(g^{{({L})}}_{{11}}(x) / g^{{({L})}}_{{22}}(x))$",
 ]
+row_margins = [0.40, 0.60, 0.45]
 
 def evaluate_final_layer_fields(mdl: MoonsMLP, pts: torch.Tensor):
-    # 1. Gaussian curvature K^(5) via Graph metric
-    geom_graph = compute_layer_geometry(mdl, pts, layer_idx=5, metric_mode="graph")
+    l_final = mdl.num_layers
+    geom_graph = compute_layer_geometry(mdl, pts, layer_idx=l_final, metric_mode="graph")
     curv_field = np.arcsinh(geom_graph["K"].detach().numpy())
 
-    # 2. Log volume density log sqrt(det g^(5)) via Euclidean pullback
-    g_eucl = compute_layer_pullback_metric(mdl, pts, layer_idx=5, metric_mode="euclidean", eps=1e-6)
+    g_eucl = compute_layer_pullback_metric(mdl, pts, layer_idx=l_final, metric_mode="euclidean", eps=1e-6)
     log_vol_field = (0.5 * torch.log(torch.clamp(torch.linalg.det(g_eucl), min=1e-8))).detach().numpy()
 
-    # 3. Metric anisotropy log(g_11 / g_22) via Graph metric
     g_gr = geom_graph["g"].detach()
     aniso_field = torch.log(torch.clamp(g_gr[:, 0, 0], min=1e-8) / torch.clamp(g_gr[:, 1, 1], min=1e-8)).numpy()
 
-    return [curv_field, log_vol_field, aniso_field]
+    return [curv_field, log_vol_field, aniso_field], [geom_graph["K"].detach(), 0.5 * torch.log(torch.clamp(torch.linalg.det(g_eucl), min=1e-8)).detach(), torch.log(torch.clamp(g_gr[:, 0, 0], min=1e-8) / torch.clamp(g_gr[:, 1, 1], min=1e-8)).detach()]
 
 grid_matrix = [[None for _ in range(4)] for _ in range(3)]
 test_acc_matrix = [[0.0 for _ in range(4)] for _ in range(3)]
-y_te_np = y_test.numpy()
 
 for col_idx, (_, mdl) in enumerate(exp_columns):
-    grid_fields = evaluate_final_layer_fields(mdl, grid_pts)
-    test_fields = evaluate_final_layer_fields(mdl, X_test)
+    grid_fields, _ = evaluate_final_layer_fields(mdl, grid_pts)
+    _, test_raw_tensors = evaluate_final_layer_fields(mdl, X_test)
     for row_idx in range(3):
         grid_matrix[row_idx][col_idx] = grid_fields[row_idx].reshape(xx.shape)
-        preds_pos = (test_fields[row_idx] > 0.0).astype(int)
-        test_acc_matrix[row_idx][col_idx] = float((preds_pos == y_te_np).mean() * 100.0)
+        preds_pos = scalar_geometric_predict(test_raw_tensors[row_idx], n_classes=N_CLASSES, margin=row_margins[row_idx])
+        test_acc_matrix[row_idx][col_idx] = float((preds_pos == y_test).float().mean().item() * 100.0)
 
 fig, axes = plt.subplots(3, 4, figsize=(17.5, 11.5), sharex=True, sharey=True)
 
@@ -1720,27 +1929,28 @@ for row_idx in range(3):
         if fld.min() < 0.0 < fld.max():
             ax.contour(xx, yy, fld, levels=[0.0], colors="k", linewidths=1.8)
 
-        ax.scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", edgecolors="w", s=18, alpha=0.85)
-        ax.scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", edgecolors="w", s=18, alpha=0.85)
+        for c in range(N_CLASSES):
+            mc = y_test == c
+            ax.scatter(X_test[mc, 0], X_test[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolors="w", s=18, alpha=0.85)
 
         acc_val = test_acc_matrix[row_idx][col_idx]
         is_target_pair = (row_idx == 0 and col_idx == 1) or (row_idx == 1 and col_idx == 2) or (row_idx == 2 and col_idx == 3)
-        tag = f"★ Target (Acc: {acc_val:.1f}%)" if is_target_pair else f"I[>0] Acc: {acc_val:.1f}%"
+        tag = f"★ Target (Acc: {acc_val:.1f}%)" if is_target_pair else f"Geom Acc: {acc_val:.1f}%"
 
         if row_idx == 0:
-            ax.set_title(f"{col_title}\\n({tag})", fontsize=10, fontweight="bold" if is_target_pair else "normal")
+            ax.set_title(f"{col_title}\n({tag})", fontsize=10, fontweight="bold" if is_target_pair else "normal")
         else:
             ax.set_title(f"({tag})", fontsize=9.5, fontweight="bold" if is_target_pair else "normal")
 
         if col_idx == 0:
-            ax.set_ylabel(f"{row_labels[row_idx]}\\n$x^2$", fontsize=10)
+            ax.set_ylabel(f"{row_labels[row_idx]}\n$x^2$", fontsize=10)
         if row_idx == 2:
             ax.set_xlabel("$x^1$", fontsize=10)
 
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
 
 plt.suptitle(
-    "3x4 Matrix of Final-Layer (l=5) Geometric Fields Across Experiments (RdBu_r: Blue < 0, White = 0, Red > 0)",
+    f"3x4 Matrix of Final-Layer (l={L}) Geometric Fields Across Experiments (RdBu_r: Blue < 0, White = 0, Red > 0)",
     y=1.01,
     fontsize=13.5,
 )
@@ -1760,26 +1970,46 @@ def build_notebook_06() -> None:
 # Notebook 06: Coupled Parameter–Data Manifold Optimization Across Purely Geometric Losses
 
 ## Research Objective
-When a neural network is trained using **purely differential-geometric losses** on its representation manifold—such as **Gaussian curvature** $K^{(5)}(x; \theta)$, **Riemannian log-volume density** $\log\sqrt{\det g^{(5)}(x; \theta)}$, or **directional metric anisotropy** $\log(\tilde{g}^{(5)}_{11}(x; \theta) / \tilde{g}^{(5)}_{22}(x; \theta))$—a parameter vector $\theta \in \Theta \subset \mathbb{R}^{422}$ does not parameterize a probability distribution $p_\theta(y \mid x)$. Instead, $\theta$ parameterizes an **immersed Riemannian metric field** on the data manifold:
+When a neural network is trained using **purely differential-geometric losses** on its representation manifold—such as **Gaussian curvature** $K^{(L)}(x; \theta)$, **Riemannian log-volume density** $\log\sqrt{\det g^{(L)}(x; \theta)}$, or **directional metric anisotropy** $\log(\tilde{g}^{(L)}_{11}(x; \theta) / \tilde{g}^{(L)}_{22}(x; \theta))$—a parameter vector $\theta \in \Theta \subset \mathbb{R}^P$ parameterizes an **immersed Riemannian metric field** on the data manifold:
 $$\mathcal{G} : \Theta \longrightarrow \mathrm{Met}(\mathcal{M}_0), \qquad \theta \longmapsto g(\cdot\,; \theta)$$
 
 Consequently, the Riemannian metric on parameter space $\Theta$ should **depend directly on the induced geometry of the data space**, rather than treating weights as flat Euclidean coordinates ($I_P$) or pulling back flat output coordinates ($G^{\Theta,\text{coord}} = \mathbb{E}_x[J_\theta^T J_\theta]$).
 
 ### Four Parameter-Space Regimes Compared
-1. **Uncoupled Euclidean Gradient Descent ($G^\Theta = I_P$)**: Standard steepest descent $\Delta\theta = -\eta \nabla_\theta \mathcal{L}_{\text{geom}}$ in flat weight coordinates, ignoring both parameter and data manifold geometry.
-2. **Uncoupled Adam (Diagonal Coordinate Preconditioning)**: Empirical per-weight second-moment scaling in $\mathbb{R}^{422}$ (the uncoupled baseline used in Notebooks 04 and 05).
-3. **Uncoupled Output-Coordinate Pullback NGD ($G^{\Theta,\text{coord}}$)**: Pulls back the flat Euclidean identity $h^{\text{out}} = I_2$ on raw outputs $z(x; \theta) \in \mathbb{R}^2$:
-   $$G^{\Theta,\text{coord}}_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\!\left[ \sum_{a=1}^2 \frac{\partial z^a(x; \theta)}{\partial \theta^\mu} \frac{\partial z^a(x; \theta)}{\partial \theta^\nu} \right] + \lambda I_P$$
-   Because $G^{\Theta,\text{coord}}$ ignores $g(x; \theta)$, it fails to quotient out rigid Euclidean motions of the output space $z \mapsto Qz + b$ ($E(2) = O(2) \ltimes \mathbb{R}^2$).
-4. **Coupled Data-Geometry Pullback NGD ($G^{\Theta,\text{DeWitt}}$ & $G^{\Theta,\text{coupled}}$)**: Pulls back the **affine-invariant DeWitt / Ebin metric** on $2 \times 2$ SPD metric tensors $\mathrm{Sym}^+_2$ alongside the Generalized Gauss-Newton (GGN) metric of the target geometric scalar field $\psi(x; \theta) \in \{K^{(5)}, \log\sqrt{\det g^{(5)}}, \log(\tilde{g}^{(5)}_{11}/\tilde{g}^{(5)}_{22})\}$:
+1. **Uncoupled Euclidean Gradient Descent ($G^\Theta = I_P$)**: Standard steepest descent $\Delta\theta = -\eta \nabla_\theta \mathcal{L}_{\text{geom}}$ in flat weight coordinates.
+2. **Uncoupled Adam (Diagonal Coordinate Preconditioning)**: Empirical per-weight second-moment scaling in $\mathbb{R}^P$ (the uncoupled baseline used in Notebooks 04 and 05).
+3. **Uncoupled Output-Coordinate Pullback NGD ($G^{\Theta,\text{coord}}$)**: Pulls back the flat Euclidean identity $h^{\text{out}} = I_{d_L}$ on raw outputs $z(x; \theta) \in \mathbb{R}^{d_L}$:
+   $$G^{\Theta,\text{coord}}_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\!\left[ \sum_{a=1}^{d_L} \frac{\partial z^a(x; \theta)}{\partial \theta^\mu} \frac{\partial z^a(x; \theta)}{\partial \theta^\nu} \right] + \lambda I_P$$
+4. **Coupled Data-Geometry Pullback NGD ($G^{\Theta,\text{DeWitt}}$ & $G^{\Theta,\text{coupled}}$)**: Pulls back the **affine-invariant DeWitt / Ebin metric** on $2 \times 2$ SPD metric tensors $\mathrm{Sym}^+_2$ alongside the Generalized Gauss-Newton (GGN) metric of the target geometric scalar field $\psi(x; \theta)$:
    $$G^{\Theta,\text{DeWitt}}_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\!\left[ g^{ik}(x; \theta)\, g^{jl}(x; \theta)\, \frac{\partial g_{ij}(x; \theta)}{\partial \theta^\mu} \frac{\partial g_{kl}(x; \theta)}{\partial \theta^\nu} \right]$$
    $$G^{\Theta,\text{coupled}}_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\!\left[ w_\psi(x; \theta) \frac{\partial \psi(x; \theta)}{\partial \theta^\mu} \frac{\partial \psi(x; \theta)}{\partial \theta^\nu} \right] + \gamma\, G^{\Theta,\text{DeWitt}}_{\mu\nu}(\theta) + G^{\Theta,\text{reg}}_{\mu\nu}(\theta) + \lambda I_P$$
-   with Riemannian geodesic trust-region updates $\Delta\theta = -\eta\, (G^{\Theta,\text{coupled}}(\theta))^{-1} \nabla_\theta \mathcal{L}_{\text{geom}}(\theta)$ subject to $\|\Delta\theta\|_{G^\Theta} \le r_{\max}$.
 """,
         },
         {
             "type": "code",
-            "source": """
+            "source": r"""
+# =============================================================================
+# USER CONFIGURATION
+# =============================================================================
+# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
+#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
+DATASET_NAME = "moons"
+N_CLASSES = 2                  # Number of classes (defaults to 2)
+DATASET_PARAMS = {
+    "n_train": 220,
+    "n_test": 120,
+    "noise": 0.10,
+    "seed": 42,
+}
+
+# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
+LAYER_DIMS = [2, 5, 10, 15, 10, 2]
+
+# 3. Activation Functions for Hidden Layers and Output Layer
+HIDDEN_ACTIVATION = "tanh"
+OUTPUT_ACTIVATION = "identity"
+# =============================================================================
+
 import sys
 from pathlib import Path
 for p in [Path.cwd(), Path.cwd().parent]:
@@ -1796,7 +2026,7 @@ from matplotlib.colors import TwoSlopeNorm
 
 from src.geometry import (
     MoonsMLP,
-    get_moons_dataset,
+    get_synthetic_dataset,
     make_evaluation_grid,
     compute_layer_geometry,
     compute_layer_pullback_metric,
@@ -1807,14 +2037,25 @@ from src.geometry import (
     curvature_margin_loss,
     volume_contrastive_loss,
     anisotropy_margin_loss,
+    scalar_geometric_predict,
 )
 
 plt.rcParams["figure.dpi"] = 120
 plt.rcParams["font.size"] = 10
 
-X_train, y_train, X_test, y_test = get_moons_dataset(n_train=220, n_test=120, noise=0.10, seed=42)
+CLASS_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
+
+X_train, y_train, X_test, y_test = get_synthetic_dataset(
+    dataset_name=DATASET_NAME,
+    n_classes=N_CLASSES,
+    input_dim=LAYER_DIMS[0],
+    **DATASET_PARAMS,
+)
 xx, yy, grid_pts = make_evaluation_grid(X_train, n_grid=28, padding=0.45)
-print(f"Dataset loaded | Train: {X_train.shape}, Test: {X_test.shape}, Grid: {grid_pts.shape}")
+print(
+    f"Dataset: {DATASET_NAME} (classes={N_CLASSES}) | Train: {X_train.shape}, Test: {X_test.shape} | "
+    f"MLP: {LAYER_DIMS} (hidden={HIDDEN_ACTIVATION}, out={OUTPUT_ACTIVATION})"
+)
 """,
         },
         {
@@ -1822,30 +2063,39 @@ print(f"Dataset loaded | Train: {X_train.shape}, Test: {X_test.shape}, Grid: {gr
             "source": r"""
 ## 1. Exact $E(2)$ Output Symmetry Quotienting & Spectral Structure on $\Theta$
 
-All three geometric objectives depend exclusively on $J_x(x)^T J_x(x)$ (or $I_2 + J_x(x)^T J_x(x)$), which is **strictly invariant under the 3-dimensional Euclidean group $E(2) = O(2) \ltimes \mathbb{R}^2$ acting on output coordinates** $z \mapsto Qz + b$:
-- **2 Output Translations**: Shifting the final bias $b^{(5)} \mapsto b^{(5)} + \delta b$.
-- **1 Output Rotation ($\mathfrak{so}(2)$)**: Rotating the final layer $(W^{(5)}, b^{(5)}) \mapsto (e^{\epsilon \Omega} W^{(5)}, e^{\epsilon \Omega} b^{(5)})$ with $\Omega = \begin{pmatrix} 0 & -1 \\ 1 & 0 \end{pmatrix}$.
+When `OUTPUT_ACTIVATION = "identity"`, all three geometric objectives depend exclusively on $J_x(x)^T J_x(x)$ (or $I_2 + J_x(x)^T J_x(x)$), which is **strictly invariant under rigid Euclidean motions acting on output coordinates** $z \mapsto Qz + b$:
+- **Output Translations**: Shifting the final bias $b^{(L)} \mapsto b^{(L)} + \delta b$.
+- **Output Rotation ($\mathfrak{so}(d_L)$)**: Rotating the final layer $(W^{(L)}, b^{(L)}) \mapsto (e^{\epsilon \Omega} W^{(L)}, e^{\epsilon \Omega} b^{(L)})$.
 
-Below we first verify that `compute_fast_graph_geometry` (using 2nd-order `jacfwd` + Gauss's equation $R_{1212} = \langle \mathrm{II}_{11}, \mathrm{II}_{22}\rangle - \|\mathrm{II}_{12}\|^2$) matches the 3rd-order Levi-Civita operator `compute_layer_geometry` to `float64` machine precision ($\sim 10^{-15}$). We then evaluate the undamped quadratic form $v^T G^\Theta v$ along all three $E(2)$ symmetry generators: uncoupled parameter metrics assign $\mathcal{O}(1)$ positive length to pure gauge motions, whereas coupled metrics ($G^{\Theta,\text{DeWitt}}$ and $G^{\Theta,\text{coupled}}$) annihilate them to machine zero!
+Below we verify that `compute_fast_graph_geometry` matches `compute_layer_geometry` to `float64` machine precision and evaluate $v^T G^\Theta v$ along these output symmetry generators.
 """,
         },
         {
             "type": "code",
             "source": r"""
-probe_model = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=7)
+probe_model = MoonsMLP(
+    layer_dims=LAYER_DIMS,
+    activation=HIDDEN_ACTIVATION,
+    output_activation=OUTPUT_ACTIVATION,
+    seed=7,
+)
+L = probe_model.num_layers
+last_idx = L - 1
+d_out = probe_model.layer_dims[-1]
+P_total = sum(p.numel() for p in probe_model.parameters())
 params_probe = {k: v.detach() for k, v in probe_model.named_parameters()}
 
 # 1. Verify Gauss-equation curvature equivalence to float64 machine precision
-ref_geom = compute_layer_geometry(probe_model, X_train[:64], layer_idx=5, metric_mode="graph", params=params_probe)
+ref_geom = compute_layer_geometry(probe_model, X_train[:64], layer_idx=L, metric_mode="graph", params=params_probe)
 g_fast, K_fast = compute_fast_graph_geometry(probe_model, X_train[:64], params=params_probe)
 print(f"Gauss Equation Consistency | max |g_fast - g_ref| = {(g_fast - ref_geom['g']).abs().max().item():.2e}")
 print(f"Gauss Equation Consistency | max |K_fast - K_ref| = {(K_fast - ref_geom['K']).abs().max().item():.2e}\n")
 
-# 2. Construct unit parameter vectors for the 3 E(2) output symmetry generators + a generic hidden direction
+# 2. Construct unit parameter vectors for output symmetry generators + a generic hidden direction
 def build_unit_param_direction(overrides: dict, seed_random: int | None = None) -> torch.Tensor:
     if seed_random is not None:
         gen = torch.Generator().manual_seed(seed_random)
-        raw = torch.randn(sum(p.numel() for p in params_probe.values()), generator=gen, dtype=torch.float64)
+        raw = torch.randn(P_total, generator=gen, dtype=torch.float64)
         return raw / raw.norm()
     chunks = []
     for k, p in params_probe.items():
@@ -1856,22 +2106,30 @@ def build_unit_param_direction(overrides: dict, seed_random: int | None = None) 
     vec = torch.cat(chunks)
     return vec / vec.norm()
 
-omega = torch.tensor([[0.0, -1.0], [1.0, 0.0]], dtype=torch.float64)
+b_e1 = torch.zeros(d_out, dtype=torch.float64)
+b_e1[0] = 1.0
+b_e2 = torch.zeros(d_out, dtype=torch.float64)
+b_e2[min(1, d_out - 1)] = 1.0
+omega = torch.zeros((d_out, d_out), dtype=torch.float64)
+if d_out >= 2:
+    omega[0, 1] = -1.0
+    omega[1, 0] = 1.0
+
 directions = [
-    ("Trans. z^1 (b5_0)", build_unit_param_direction({"layers.4.bias": torch.tensor([1.0, 0.0], dtype=torch.float64)})),
-    ("Trans. z^2 (b5_1)", build_unit_param_direction({"layers.4.bias": torch.tensor([0.0, 1.0], dtype=torch.float64)})),
-    ("Rot. so(2) (W5,b5)", build_unit_param_direction({
-        "layers.4.weight": omega @ params_probe["layers.4.weight"],
-        "layers.4.bias": omega @ params_probe["layers.4.bias"],
+    ("Trans. z^1 (bL_0)", build_unit_param_direction({f"layers.{last_idx}.bias": b_e1})),
+    ("Trans. z^2 (bL_1)", build_unit_param_direction({f"layers.{last_idx}.bias": b_e2})),
+    ("Rot. so(2) (WL,bL)", build_unit_param_direction({
+        f"layers.{last_idx}.weight": omega @ params_probe[f"layers.{last_idx}.weight"],
+        f"layers.{last_idx}.bias": omega @ params_probe[f"layers.{last_idx}.bias"],
     })),
     ("Generic Hidden Dir.", build_unit_param_direction({}, seed_random=123)),
 ]
 
-G_eucl = torch.eye(422, dtype=torch.float64)
+G_eucl = torch.eye(P_total, dtype=torch.float64)
 G_coord_0 = compute_uncoupled_coord_metric(probe_model, X_train, damping=0.0)
 G_dewitt_0 = compute_coupled_dewitt_metric(probe_model, X_train, metric_mode="graph", damping=0.0)
-G_coup_vol_0 = compute_coupled_geometric_metric(probe_model, X_train, y_train, task="volume", margin=0.60, damping=0.0)
-G_coup_curv_0 = compute_coupled_geometric_metric(probe_model, X_train, y_train, task="curvature", margin=0.40, damping=0.0)
+G_coup_vol_0 = compute_coupled_geometric_metric(probe_model, X_train, y_train, task="volume", margin=0.60, damping=0.0, n_classes=N_CLASSES)
+G_coup_curv_0 = compute_coupled_geometric_metric(probe_model, X_train, y_train, task="curvature", margin=0.40, damping=0.0, n_classes=N_CLASSES)
 
 metric_mats = [
     ("Uncoupled I_P", G_eucl, "#7f7f7f"),
@@ -1893,7 +2151,6 @@ for d_name, v in directions:
 
 fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.4))
 
-# Panel 1: Quadratic form on E(2) output symmetry generators vs generic direction
 x_pos = np.arange(len(directions))
 bar_w = 0.19
 for idx, (m_name, _, col) in enumerate(metric_mats):
@@ -1907,7 +2164,6 @@ axes[0].set_title(r"Exact Quotienting of $E(2)$ Output Symmetries")
 axes[0].legend(fontsize=8.5, loc="upper left")
 axes[0].grid(axis="y", alpha=0.3)
 
-# Panel 2: Eigenvalue spectra of the 422x422 parameter metrics
 spec_items = [
     ("Uncoupled Coord-GGN", G_coord_0, "#ff7f0e", "--"),
     ("Coupled DeWitt (Graph)", G_dewitt_0, "#1f77b4", "-"),
@@ -1920,9 +2176,9 @@ for label, G_m, col, ls in spec_items:
 
 axes[1].set_xscale("log")
 axes[1].set_yscale("log")
-axes[1].set_xlabel(r"Eigenvalue Index $k$ ($P = 422$)")
+axes[1].set_xlabel(f"Eigenvalue Index $k$ ($P = {P_total}$)")
 axes[1].set_ylabel(r"Eigenvalue $\lambda_k(G^\Theta(\theta))$")
-axes[1].set_title("422x422 Parameter Metric Spectra at Initialization")
+axes[1].set_title(f"{P_total}x{P_total} Parameter Metric Spectra at Initialization")
 axes[1].legend(fontsize=8.5)
 axes[1].grid(alpha=0.3)
 
@@ -1935,12 +2191,7 @@ plt.show()
             "source": r"""
 ## 2. Coupled vs. Uncoupled Optimization Across All Three Purely Geometric Losses
 
-We now train identical `[2 -> 5 -> 10 -> 15 -> 10 -> 2]` MLPs (`seed = 7`) for **45 optimization steps** across all three purely geometric classification paradigms:
-1. **Volume-Element Contrastive Loss**: $\log\sqrt{\det g^{(5)}(x)} \le -0.60$ (Class $0$) vs. $\ge +0.60$ (Class $1$) under Euclidean pullback $g^{(5)} = J_x^T J_x + \epsilon I_2$.
-2. **Metric Anisotropy Margin Loss**: $\log(\tilde{g}^{(5)}_{11}(x) / \tilde{g}^{(5)}_{22}(x)) \le -0.45$ (Class $0$) vs. $\ge +0.45$ (Class $1$) under Graph pullback $\tilde{g}^{(5)} = I_2 + J_x^T J_x$.
-3. **Gaussian Curvature Margin Loss**: $K^{(5)}(x) \le -0.40$ (Class $0$) vs. $\ge +0.40$ (Class $1$) under Graph pullback $\tilde{g}^{(5)} = I_2 + J_x^T J_x$.
-
-For each loss, we compare **Uncoupled Euclidean GD**, **Uncoupled Adam**, **Uncoupled Coord-NGD** ($G^{\Theta,\text{coord}}$), and **Coupled Geom-NGD** ($G^{\Theta,\text{coupled}}$), enforcing an identical Riemannian trust-region radius $\|\Delta\theta\|_{G^\Theta} \le 0.85$ on both natural-gradient methods so the comparison isolates **metric coupling** purely.
+We now train identical configured MLPs (`seed = 7`) for **45 optimization steps** across all three purely geometric classification paradigms, comparing **Uncoupled Euclidean GD**, **Uncoupled Adam**, **Uncoupled Coord-NGD** ($G^{\Theta,\text{coord}}$), and **Coupled Geom-NGD** ($G^{\Theta,\text{coupled}}$).
 """,
         },
         {
@@ -1948,7 +2199,7 @@ For each loss, we compare **Uncoupled Euclidean GD**, **Uncoupled Adam**, **Unco
             "source": r"""
 TASK_CONFIGS = {
     "volume": {
-        "title": r"Volume-Element Loss ($\log\sqrt{\det g^{(5)}}$)",
+        "title": rf"Volume-Element Loss ($\log\sqrt{{\det g^{{({L})}}}}$)",
         "margin": 0.60,
         "gd_lr": 0.08,
         "adam_lr": 0.02,
@@ -1968,7 +2219,7 @@ TASK_CONFIGS = {
         "damping": 0.020,
     },
     "curvature": {
-        "title": r"Gaussian Curvature Loss ($K^{(5)} \lessgtr 0$)",
+        "title": rf"Gaussian Curvature Loss ($K^{{({L})}} \lessgtr 0$)",
         "margin": 0.40,
         "gd_lr": 0.04,
         "adam_lr": 0.02,
@@ -1982,30 +2233,31 @@ TASK_CONFIGS = {
 
 def evaluate_geometric_task(model: MoonsMLP, X_tr: torch.Tensor, y_tr: torch.Tensor, X_te: torch.Tensor, y_te: torch.Tensor, task: str, margin: float):
     params = dict(model.named_parameters())
+    l_out = model.num_layers
     if task == "volume":
-        g_tr = compute_layer_pullback_metric(model, X_tr, layer_idx=5, metric_mode="euclidean", eps=1e-6, params=params)
-        loss, metrics = volume_contrastive_loss(g_tr, y_tr, margin=margin)
+        g_tr = compute_layer_pullback_metric(model, X_tr, layer_idx=l_out, metric_mode="euclidean", eps=1e-6, params=params)
+        loss, metrics = volume_contrastive_loss(g_tr, y_tr, margin=margin, n_classes=N_CLASSES)
         with torch.no_grad():
-            g_te = compute_layer_pullback_metric(model, X_te, layer_idx=5, metric_mode="euclidean", eps=1e-6)
+            g_te = compute_layer_pullback_metric(model, X_te, layer_idx=l_out, metric_mode="euclidean", eps=1e-6)
             psi_te = 0.5 * torch.log(torch.clamp(torch.linalg.det(g_te), min=1e-8))
-            te_acc = ((psi_te > 0.0).long() == y_te).float().mean().item()
+            te_acc = (scalar_geometric_predict(psi_te, n_classes=N_CLASSES, margin=margin) == y_te).float().mean().item()
         return loss, metrics["geom_acc"], te_acc
 
     if task == "anisotropy":
-        g_tr = compute_layer_pullback_metric(model, X_tr, layer_idx=5, metric_mode="graph", params=params)
-        loss, metrics = anisotropy_margin_loss(g_tr, y_tr, margin=margin)
+        g_tr = compute_layer_pullback_metric(model, X_tr, layer_idx=l_out, metric_mode="graph", params=params)
+        loss, metrics = anisotropy_margin_loss(g_tr, y_tr, margin=margin, n_classes=N_CLASSES)
         with torch.no_grad():
-            g_te = compute_layer_pullback_metric(model, X_te, layer_idx=5, metric_mode="graph")
+            g_te = compute_layer_pullback_metric(model, X_te, layer_idx=l_out, metric_mode="graph")
             psi_te = torch.log(torch.clamp(g_te[:, 0, 0], min=1e-8) / torch.clamp(g_te[:, 1, 1], min=1e-8))
-            te_acc = ((psi_te > 0.0).long() == y_te).float().mean().item()
+            te_acc = (scalar_geometric_predict(psi_te, n_classes=N_CLASSES, margin=margin) == y_te).float().mean().item()
         return loss, metrics["geom_acc"], te_acc
 
     if task == "curvature":
         g_tr, K_tr = compute_fast_graph_geometry(model, X_tr, params=params)
-        loss, metrics = curvature_margin_loss(K_tr, y_tr, g_tr, margin=margin, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0)
+        loss, metrics = curvature_margin_loss(K_tr, y_tr, g_tr, margin=margin, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0, n_classes=N_CLASSES)
         with torch.no_grad():
             _, K_te = compute_fast_graph_geometry(model, X_te)
-            te_acc = ((K_te > 0.0).long() == y_te).float().mean().item()
+            te_acc = (scalar_geometric_predict(K_te, n_classes=N_CLASSES, margin=margin) == y_te).float().mean().item()
         return loss, metrics["geom_acc"], te_acc
 
     raise ValueError(task)
@@ -2014,8 +2266,13 @@ def evaluate_geometric_task(model: MoonsMLP, X_tr: torch.Tensor, y_tr: torch.Ten
 def train_geometric_optimizer(task: str, opt_kind: str, n_steps: int = 45, seed: int = 7):
     cfg = TASK_CONFIGS[task]
     margin = cfg["margin"]
-    mdl = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=seed)
-    b5_init = mdl.layers[4].bias.detach().clone()
+    mdl = MoonsMLP(
+        layer_dims=LAYER_DIMS,
+        activation=HIDDEN_ACTIVATION,
+        output_activation=OUTPUT_ACTIVATION,
+        seed=seed,
+    )
+    bL_init = mdl.layers[-1].bias.detach().clone()
 
     adam_opt = torch.optim.Adam(mdl.parameters(), lr=cfg["adam_lr"]) if opt_kind == "adam" else None
     hist = {"loss": [], "train_acc": [], "test_acc": [], "b5_drift": [], "time_s": []}
@@ -2024,12 +2281,12 @@ def train_geometric_optimizer(task: str, opt_kind: str, n_steps: int = 45, seed:
     for step in range(n_steps):
         mdl.zero_grad()
         loss, tr_acc, te_acc = evaluate_geometric_task(mdl, X_train, y_train, X_test, y_test, task, margin)
-        b5_drift = (mdl.layers[4].bias.detach() - b5_init).norm().item()
+        b_drift = (mdl.layers[-1].bias.detach() - bL_init).norm().item()
 
         hist["loss"].append(loss.item())
         hist["train_acc"].append(tr_acc * 100.0)
         hist["test_acc"].append(te_acc * 100.0)
-        hist["b5_drift"].append(b5_drift)
+        hist["b5_drift"].append(b_drift)
         hist["time_s"].append(time.perf_counter() - t_start)
 
         loss.backward()
@@ -2062,6 +2319,7 @@ def train_geometric_optimizer(task: str, opt_kind: str, n_steps: int = 45, seed:
                     margin=margin,
                     dewitt_weight=cfg["dewitt_weight"],
                     damping=cfg["damping"],
+                    n_classes=N_CLASSES,
                 )
                 lr = cfg["coupled_lr"]
 
@@ -2077,14 +2335,11 @@ def train_geometric_optimizer(task: str, opt_kind: str, n_steps: int = 45, seed:
         else:
             raise ValueError(opt_kind)
 
-    # Record final post-step evaluation at step = n_steps
-    with torch.no_grad():
-        pass
     loss_f, tr_f, te_f = evaluate_geometric_task(mdl, X_train, y_train, X_test, y_test, task, margin)
     hist["loss"].append(loss_f.item())
     hist["train_acc"].append(tr_f * 100.0)
     hist["test_acc"].append(te_f * 100.0)
-    hist["b5_drift"].append((mdl.layers[4].bias.detach() - b5_init).norm().item())
+    hist["b5_drift"].append((mdl.layers[-1].bias.detach() - bL_init).norm().item())
     hist["time_s"].append(time.perf_counter() - t_start)
 
     return mdl, hist
@@ -2100,7 +2355,7 @@ OPTIMIZER_SPECS = [
 N_STEPS = 45
 all_runs = {t: {} for t in ["volume", "anisotropy", "curvature"]}
 
-print(f"{'Geometric Task':<13} | {'Optimizer':<21} | {'Step 10 Acc':>11} | {'Step 25 Acc':>11} | {'Final Loss':>10} | {'Final Test Acc':>14} | {'b5 Gauge Drift':>14}")
+print(f"{'Geometric Task':<13} | {'Optimizer':<21} | {'Step 10 Acc':>11} | {'Step 25 Acc':>11} | {'Final Loss':>10} | {'Final Test Acc':>14} | {'bL Gauge Drift':>14}")
 print("-" * 112)
 
 for task_name in ["volume", "anisotropy", "curvature"]:
@@ -2113,7 +2368,6 @@ for task_name in ["volume", "anisotropy", "curvature"]:
         )
     print("-" * 112)
 
-# Plot 2x3 Convergence Curves (Loss & Test Accuracy across all 3 geometric losses)
 fig, axes = plt.subplots(2, 3, figsize=(16.8, 7.6), sharex=True)
 steps_axis = np.arange(N_STEPS + 1)
 
@@ -2128,7 +2382,7 @@ for col_idx, task_name in enumerate(["volume", "anisotropy", "curvature"]):
     axes[0, col_idx].set_title(TASK_CONFIGS[task_name]["title"])
     axes[0, col_idx].grid(alpha=0.3, which="both")
 
-    axes[1, col_idx].set_ylim(38.0, 102.5)
+    axes[1, col_idx].set_ylim(min(38.0, 100.0 / N_CLASSES - 10.0), 102.5)
     axes[1, col_idx].set_xlabel("Optimization Step")
     axes[1, col_idx].grid(alpha=0.3)
 
@@ -2147,18 +2401,19 @@ plt.show()
             "source": r"""
 ## 3. $3 \times 4$ Spatial Decision Landscapes: Coupled vs. Uncoupled Learned Manifolds
 
-To inspect how parameter-data metric coupling shapes the learned representation manifold in ambient input space $(x^1, x^2)$, we plot the learned target geometric field $\psi(x^1, x^2)$ after 45 steps across all **3 geometric objectives (rows)** and **4 optimizers (columns)**. Each panel is centered at the geometric decision threshold $\psi(x) = 0$ (black contour; blue $< 0$ for Class $0$, red $> 0$ for Class $1$).
+To inspect how parameter-data metric coupling shapes the learned representation manifold in ambient input space $(x^1, x^2)$, we plot the learned target geometric field $\psi(x^1, x^2)$ after 45 steps across all **3 geometric objectives (rows)** and **4 optimizers (columns)**.
 """,
         },
         {
             "type": "code",
             "source": r"""
 def eval_target_field_on_points(mdl: MoonsMLP, pts: torch.Tensor, task: str) -> np.ndarray:
+    l_out = mdl.num_layers
     if task == "volume":
-        g = compute_layer_pullback_metric(mdl, pts, layer_idx=5, metric_mode="euclidean", eps=1e-6)
+        g = compute_layer_pullback_metric(mdl, pts, layer_idx=l_out, metric_mode="euclidean", eps=1e-6)
         return (0.5 * torch.log(torch.clamp(torch.linalg.det(g), min=1e-8))).detach().numpy()
     if task == "anisotropy":
-        g = compute_layer_pullback_metric(mdl, pts, layer_idx=5, metric_mode="graph")
+        g = compute_layer_pullback_metric(mdl, pts, layer_idx=l_out, metric_mode="graph")
         return torch.log(torch.clamp(g[:, 0, 0], min=1e-8) / torch.clamp(g[:, 1, 1], min=1e-8)).detach().numpy()
     if task == "curvature":
         _, K = compute_fast_graph_geometry(mdl, pts)
@@ -2166,9 +2421,9 @@ def eval_target_field_on_points(mdl: MoonsMLP, pts: torch.Tensor, task: str) -> 
     raise ValueError(task)
 
 row_specs = [
-    ("volume", "Log Volume\n" + r"$\log\sqrt{\det g^{(5)}(x)}$"),
-    ("anisotropy", "Anisotropy\n" + r"$\log(\tilde{g}^{(5)}_{11}/\tilde{g}^{(5)}_{22})$"),
-    ("curvature", "Curvature\n" + r"$\mathrm{arcsinh}(K^{(5)}(x))$"),
+    ("volume", "Log Volume\n" + rf"$\log\sqrt{{\det g^{{({L})}}(x)}}$"),
+    ("anisotropy", "Anisotropy\n" + rf"$\log(\tilde{{g}}^{{({L})}}_{{11}}/\tilde{{g}}^{{({L})}}_{{22}})$"),
+    ("curvature", "Curvature\n" + rf"$\mathrm{{arcsinh}}(K^{{({L})}}(x))$"),
 ]
 
 fig, axes = plt.subplots(3, 4, figsize=(17.2, 11.0), sharex=True, sharey=True)
@@ -2185,8 +2440,9 @@ for r_idx, (task_name, row_lbl) in enumerate(row_specs):
         if fld.min() < 0.0 < fld.max():
             ax.contour(xx, yy, fld, levels=[0.0], colors="k", linewidths=1.9)
 
-        ax.scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", edgecolors="w", s=18, alpha=0.85)
-        ax.scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", edgecolors="w", s=18, alpha=0.85)
+        for c in range(N_CLASSES):
+            mc = y_test == c
+            ax.scatter(X_test[mc, 0], X_test[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolors="w", s=18, alpha=0.85)
 
         acc_final = h["test_acc"][-1]
         loss_final = h["loss"][-1]
@@ -2214,28 +2470,29 @@ plt.show()
 ## 4. Mechanistic Diagnostics: Spurious Gauge Drift & Unclipped Curvature Stiffness
 
 Comparing the optimization trajectories exposes **two fundamental geometric mechanisms** distinguishing coupled from uncoupled parameter metrics:
-
-1. **Elimination of Cross-Covariance Gauge Drift (`Uncoupled Coord-NGD` vs. `Coupled Geom-NGD`)**:
-   Even though $\nabla_{b^{(5)}} \mathcal{L}_{\text{geom}} \equiv 0$ identically (output translations never affect spatial Jacobians $J_x$), `Uncoupled Coord-NGD` exhibits large drift in $b^{(5)}$! Why? Because $G^{\Theta,\text{coord}} = \mathbb{E}_x[(J_\theta z)^T (J_\theta z)]$ has non-zero off-diagonal cross-covariance $\mathbb{E}_x[\partial_{\theta_{\text{hidden}}} z]$ coupling hidden weights to $b^{(5)}$. Solving $G^{\Theta,\text{coord}} \Delta\theta = -\nabla_\theta \mathcal{L}_{\text{geom}}$ actively shifts $b^{(5)}$ to cancel the mean displacement of $W^{(5)} h^{(4)}(x)$, wasting trust-region budget on a pure gauge direction. `Coupled Geom-NGD` has zero cross-covariance with $E(2)$ gauge modes and keeps $\|b^{(5)}(t) - b^{(5)}(0)\|_2 = 0$ identically.
-2. **Intrinsic Stiffness Preconditioning Without Gradient Clipping**:
-   In Notebooks 04 and 05, 3rd-order Gaussian curvature optimization required explicit gradient norm clipping (`clip_grad_norm_`) because regions with small $\det\tilde{g}$ trigger sharp Euclidean gradient spikes ($\nabla_\theta K \propto (\det\tilde{g})^{-2}$). Below we **disable all gradient norm clipping** and push a stiffer curvature margin ($\tau = 0.65, k_{\text{clip}} = 25$): uncoupled Euclidean GD suffers violent gradient/loss spikes, whereas `Coupled Geom-NGD` automatically attenuates stiff directions through $(G^{\Theta,\text{coupled}})^{-1}$!
+1. **Elimination of Cross-Covariance Gauge Drift (`Uncoupled Coord-NGD` vs. `Coupled Geom-NGD`)**.
+2. **Intrinsic Stiffness Preconditioning Without Gradient Clipping**.
 """,
         },
         {
             "type": "code",
             "source": r"""
-# Unclipped high-stiffness curvature experiment (no clip_grad_norm_)
 def run_unclipped_curvature_stiffness_test(steps: int = 35):
     results_stiff = {}
     for mode_name, lr in [("Uncoupled GD (Unclipped, lr=0.07)", 0.07), ("Coupled Geom-NGD (Unclipped, lr=0.28)", 0.28)]:
-        mdl = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=7)
+        mdl = MoonsMLP(
+            layer_dims=LAYER_DIMS,
+            activation=HIDDEN_ACTIVATION,
+            output_activation=OUTPUT_ACTIVATION,
+            seed=7,
+        )
         losses, grad_norms, test_accs = [], [], []
 
         for _ in range(steps):
             mdl.zero_grad()
             params = dict(mdl.named_parameters())
             g_tr, K_tr = compute_fast_graph_geometry(mdl, X_train, params=params)
-            loss, _ = curvature_margin_loss(K_tr, y_train, g_tr, margin=0.65, lambda_vol=0.02, lambda_iso=0.005, k_clip=25.0)
+            loss, _ = curvature_margin_loss(K_tr, y_train, g_tr, margin=0.65, lambda_vol=0.02, lambda_iso=0.005, k_clip=25.0, n_classes=N_CLASSES)
             loss.backward()
 
             g_flat = torch.cat([
@@ -2247,17 +2504,17 @@ def run_unclipped_curvature_stiffness_test(steps: int = 35):
 
             with torch.no_grad():
                 _, K_te = compute_fast_graph_geometry(mdl, X_test)
-                test_accs.append(((K_te > 0.0).long() == y_test).float().mean().item() * 100.0)
+                preds_k = scalar_geometric_predict(K_te, n_classes=N_CLASSES, margin=0.65)
+                test_accs.append((preds_k == y_test).float().mean().item() * 100.0)
 
             if "Uncoupled" in mode_name:
-                # Raw unclipped Euclidean step
                 with torch.no_grad():
                     for p in mdl.parameters():
                         if p.grad is not None:
                             p -= lr * p.grad
             else:
                 G_c = compute_coupled_geometric_metric(
-                    mdl, X_train, y_train, task="curvature", margin=0.65, k_clip=25.0, dewitt_weight=0.20, damping=0.025
+                    mdl, X_train, y_train, task="curvature", margin=0.65, k_clip=25.0, dewitt_weight=0.20, damping=0.025, n_classes=N_CLASSES
                 )
                 nat_step = torch.linalg.solve(G_c, g_flat)
                 r_norm = torch.sqrt(torch.clamp(nat_step @ (G_c @ nat_step), min=1e-12)).item()
@@ -2276,19 +2533,17 @@ stiff_res = run_unclipped_curvature_stiffness_test(steps=35)
 
 fig, axes = plt.subplots(1, 3, figsize=(16.5, 4.3))
 
-# Panel 1: Spurious b5 translation gauge drift across the 3 tasks
 task_colors = {"volume": "#9467bd", "anisotropy": "#ff7f0e", "curvature": "#d62728"}
 for t_name, t_col in task_colors.items():
     axes[0].plot(all_runs[t_name]["coord_ngd"][1]["b5_drift"], ls="-.", lw=2.0, color=t_col, label=f"Uncoupled Coord-NGD ({t_name})")
     axes[0].plot(all_runs[t_name]["coupled_ngd"][1]["b5_drift"], ls="-", lw=2.2, color=t_col, alpha=0.85, label=f"Coupled Geom-NGD ({t_name})")
 
 axes[0].set_xlabel("Optimization Step")
-axes[0].set_ylabel(r"Output Bias Drift $\|b^{(5)}(t) - b^{(5)}(0)\|_2$")
+axes[0].set_ylabel(rf"Output Bias Drift $\|b^{{({L})}}(t) - b^{{({L})}}(0)\|_2$")
 axes[0].set_title(r"Spurious Translation Gauge Drift on $\Theta$")
 axes[0].legend(fontsize=7.5, ncol=1, loc="upper left")
 axes[0].grid(alpha=0.3)
 
-# Panel 2: Unclipped curvature loss stability
 for label, col, ls in [
     ("Uncoupled GD (Unclipped, lr=0.07)", "#d62728", "--"),
     ("Coupled Geom-NGD (Unclipped, lr=0.28)", "#2ca02c", "-"),
@@ -2317,10 +2572,6 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 5. Ablation: Universal Unsupervised DeWitt Metric ($G^{\Theta,\text{DeWitt}}$) vs. Task-Coupled Metric ($G^{\Theta,\text{coupled}}$)
-
-Finally, we isolate the role of the **two coupled terms** in $G^{\Theta,\text{coupled}}$:
-- **Pure DeWitt Metric Pullback ($G^{\Theta,\text{DeWitt}}$)**: Depends *exclusively* on the induced $2 \times 2$ data-space metric $g(x; \theta)$ via $\mathbb{E}_x[\mathrm{Tr}(g^{-1}\partial_\mu g\, g^{-1}\partial_\nu g)]$—completely unsupervised with respect to class labels $y$ and agnostic to which geometric invariant is in the loss.
-- **Task-Coupled Geometric Metric ($G^{\Theta,\text{coupled}}$)**: Augments $G^{\Theta,\text{DeWitt}}$ with the Generalized Gauss-Newton pullback of the target invariant $\psi(x; \theta)$. For Gaussian curvature $K^{(5)}(x; \theta)$ (a 2nd-order spatial differential invariant of $g$), adding $\partial_\theta K^{(5)}$ upgrades the 0th-order $L^2$ DeWitt metric on $\mathrm{Met}(\mathcal{M}_0)$ to a **2nd-order Sobolev-DeWitt metric**, yielding an additional jump in convergence speed!
 """,
         },
         {
@@ -2330,7 +2581,12 @@ def train_pure_dewitt_ngd(task: str, n_steps: int = 45, seed: int = 7):
     cfg = TASK_CONFIGS[task]
     margin = cfg["margin"]
     m_mode = "euclidean" if task == "volume" else "graph"
-    mdl = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=seed)
+    mdl = MoonsMLP(
+        layer_dims=LAYER_DIMS,
+        activation=HIDDEN_ACTIVATION,
+        output_activation=OUTPUT_ACTIVATION,
+        seed=seed,
+    )
     hist = {"loss": [], "test_acc": []}
 
     for _ in range(n_steps):
@@ -2405,24 +2661,42 @@ def build_notebook_07() -> None:
 
 ## Research Objective
 Training neural networks with **exact differential-geometric losses** requires nested symbolic automatic differentiation:
-- **Volume-Element** ($\log\sqrt{\det g^{(5)}}$) and **Metric Anisotropy** ($\log(\tilde{g}^{(5)}_{11}/\tilde{g}^{(5)}_{22})$) require **2nd-order** mixed derivatives $\nabla_\theta \partial_x z$.
-- **Gaussian Curvature** ($K^{(5)} = R_{1212}/\det\tilde{g}^{(5)}$) requires **3rd-order** mixed derivatives $\nabla_\theta \partial_x^2 z$ (and up to $1{,}122$ autograd graph nodes and $>500\text{ MB/step}$ in naive Levi-Civita form).
+- **Volume-Element** ($\log\sqrt{\det g^{(L)}}$) and **Metric Anisotropy** ($\log(\tilde{g}^{(L)}_{11}/\tilde{g}^{(L)}_{22})$) require **2nd-order** mixed derivatives $\nabla_\theta \partial_x z$.
+- **Gaussian Curvature** ($K^{(L)} = R_{1212}/\det\tilde{g}^{(L)}$) requires **3rd-order** mixed derivatives $\nabla_\theta \partial_x^2 z$.
 
 In this notebook, we implement and benchmark **four principled approaches** that reduce compute and memory toward standard **1st-order `SGD` with Cross-Entropy loss** by replacing symbolic spatial derivatives with forward-only discrete or algebraic geometric operators:
 
-1. **Approach 1 — Batched Finite-Difference Stencils (Pure 1st-Order Autodiff)**:
-   Evaluates displaced spatial inputs in a single batched forward pass (`3N` for $g_{ij}$, `7N` central stencil + Gauss's equation for $K$), completely eliminating nested `jacrev`/`jacfwd` graphs so `loss.backward()` is a pure 1st-order pass.
-2. **Approach 2 — Precomputed Point-Cloud $k$-NN Taylor Jet Operators (`1N` Single Forward Pass)**:
-   Fits Gaussian-weighted local linear (`order=1`) or quadratic (`order=2`) Taylor regression operators $Q_i$ on input $k$-nearest neighbors **once at $t=0$**, computing $(\hat{g}_i, \hat{K}_i)$ online from the **exact same single `1N` forward pass `Z = model(X)` as Cross-Entropy `SGD`** (zero extra network evaluations).
-3. **Approach 3 — Randomized Tangent-Plane Sketching / Hutchinson Directional Probes ($O(1)$ in Input Dimension $d_0$)**:
-   Evaluates directional differences along $m \in \{1, 2\}$ random orthonormal tangent vectors $Q \in \mathbb{R}^{d_0 \times m}$, keeping forward evaluations strictly $O(1)$ even when ambient input dimension $d_0 \gg 2$.
-4. **Approach 4 — Algebraic Order Reduction Before Autodiff (Gauss's Extrinsic-to-Intrinsic Identity)**:
-   Replaces 3rd-order intrinsic Levi-Civita metric derivatives $\partial_x^2 g_{ij}$ with Gauss's equation $R_{1212} = \langle \mathrm{II}_{11}, \mathrm{II}_{22}\rangle - \|\mathrm{II}_{12}\|^2$, cancelling cancelling $\partial_x^3 z$ autodiff terms analytically with **zero approximation error**.
+1. **Approach 1 — Batched Finite-Difference Stencils (Pure 1st-Order Autodiff)**
+2. **Approach 2 — Precomputed Point-Cloud $k$-NN Taylor Jet Operators (`1N` Single Forward Pass)**
+3. **Approach 3 — Randomized Tangent-Plane Sketching / Hutchinson Directional Probes ($O(1)$ in Input Dimension $d_0$)**
+4. **Approach 4 — Algebraic Order Reduction Before Autodiff (Gauss's Extrinsic-to-Intrinsic Identity)**
 """,
         },
         {
             "type": "code",
             "source": r"""
+# =============================================================================
+# USER CONFIGURATION
+# =============================================================================
+# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
+#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
+DATASET_NAME = "moons"
+N_CLASSES = 2                  # Number of classes (defaults to 2)
+DATASET_PARAMS = {
+    "n_train": 220,
+    "n_test": 120,
+    "noise": 0.10,
+    "seed": 42,
+}
+
+# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
+LAYER_DIMS = [2, 5, 10, 15, 10, 2]
+
+# 3. Activation Functions for Hidden Layers and Output Layer
+HIDDEN_ACTIVATION = "tanh"
+OUTPUT_ACTIVATION = "identity"
+# =============================================================================
+
 import sys
 from pathlib import Path
 for p in [Path.cwd(), Path.cwd().parent]:
@@ -2439,7 +2713,7 @@ from matplotlib.colors import TwoSlopeNorm
 
 from src.geometry import (
     MoonsMLP,
-    get_moons_dataset,
+    get_synthetic_dataset,
     make_evaluation_grid,
     compute_layer_geometry,
     compute_layer_pullback_metric,
@@ -2455,12 +2729,21 @@ from src.geometry import (
     curvature_margin_loss,
     volume_contrastive_loss,
     anisotropy_margin_loss,
+    scalar_geometric_predict,
 )
 
 plt.rcParams["figure.dpi"] = 120
 plt.rcParams["font.size"] = 10
 
-X_train, y_train, X_test, y_test = get_moons_dataset(n_train=220, n_test=120, noise=0.10, seed=42)
+CE_LAYER_DIMS = [*LAYER_DIMS[:-1], max(LAYER_DIMS[-1], N_CLASSES)]
+CLASS_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
+
+X_train, y_train, X_test, y_test = get_synthetic_dataset(
+    dataset_name=DATASET_NAME,
+    n_classes=N_CLASSES,
+    input_dim=LAYER_DIMS[0],
+    **DATASET_PARAMS,
+)
 xx, yy, grid_pts = make_evaluation_grid(X_train, n_grid=28, padding=0.45)
 
 # Precompute offline t=0 point-cloud k-NN operators (Approach 2)
@@ -2468,10 +2751,19 @@ t0_knn = time.perf_counter()
 knn_idx_lin, knn_op_lin = build_knn_jet_operator(X_train, k_neighbors=10, order=1, ridge=1e-4)
 knn_idx_quad, knn_op_quad = build_knn_jet_operator(X_train, k_neighbors=16, order=2, ridge=1e-4)
 knn_precomp_ms = (time.perf_counter() - t0_knn) * 1000.0
-print(f"Offline t=0 k-NN Jet Precomputation: {knn_precomp_ms:.2f} ms | Linear op: {tuple(knn_op_lin.shape)}, Quadratic op: {tuple(knn_op_quad.shape)}")
+print(
+    f"Dataset: {DATASET_NAME} (classes={N_CLASSES}) | MLP: {LAYER_DIMS} (hidden={HIDDEN_ACTIVATION}, out={OUTPUT_ACTIVATION})\n"
+    f"Offline t=0 k-NN Jet Precomputation: {knn_precomp_ms:.2f} ms | Linear op: {tuple(knn_op_lin.shape)}, Quadratic op: {tuple(knn_op_quad.shape)}"
+)
 
 # Section 1: Numerical approximation fidelity vs. Exact Autodiff on a trained reference MLP
-ref_mlp = MoonsMLP(activation="tanh", seed=7)
+ref_mlp = MoonsMLP(
+    layer_dims=CE_LAYER_DIMS,
+    activation=HIDDEN_ACTIVATION,
+    output_activation=OUTPUT_ACTIVATION,
+    seed=7,
+)
+L_ref = ref_mlp.num_layers
 ref_opt = torch.optim.SGD(ref_mlp.parameters(), lr=0.12, momentum=0.9)
 ce_loss_fn = nn.CrossEntropyLoss()
 for _ in range(100):
@@ -2480,9 +2772,9 @@ for _ in range(100):
     ref_opt.step()
 
 with torch.no_grad():
-    geom_exact_levi = compute_layer_geometry(ref_mlp, X_train, layer_idx=5, metric_mode="graph")
+    geom_exact_levi = compute_layer_geometry(ref_mlp, X_train, layer_idx=L_ref, metric_mode="graph")
     g_exact_gauss, K_exact_gauss = compute_fast_graph_geometry(ref_mlp, X_train)
-    g_eucl_exact = compute_layer_pullback_metric(ref_mlp, X_train, layer_idx=5, metric_mode="euclidean", eps=1e-6)
+    g_eucl_exact = compute_layer_pullback_metric(ref_mlp, X_train, layer_idx=L_ref, metric_mode="euclidean", eps=1e-6)
     lv_exact = 0.5 * torch.log(torch.clamp(torch.linalg.det(g_eucl_exact), min=1e-8))
 
     h_grid = np.logspace(-6, -1, 16)
@@ -2504,7 +2796,7 @@ print(f"Approach 2 (1N k-NN Jet) Pearson r(K_knn, K_exact)   : {np.corrcoef(K_kn
 
 fig, axes = plt.subplots(1, 2, figsize=(13.2, 4.3))
 axes[0].plot(h_grid, fd_vol_errs, "o-", lw=2.0, color="#1f77b4", label=r"Approach 1: 3-pt Forward FD $|\Delta \log\sqrt{\det g}|$ ($O(h)$)")
-axes[0].plot(h_grid, fd_curv_errs, "s-", lw=2.0, color="#d62728", label=r"Approach 1: 7-pt Central FD $|\Delta K^{(5)}|$ ($O(h^2)$)")
+axes[0].plot(h_grid, fd_curv_errs, "s-", lw=2.0, color="#d62728", label=rf"Approach 1: 7-pt Central FD $|\Delta K^{{({L_ref})}}|$ ($O(h^2)$)")
 axes[0].set_xscale("log")
 axes[0].set_yscale("log")
 axes[0].set_xlabel(r"Finite-Difference Step Size $h$")
@@ -2513,12 +2805,12 @@ axes[0].set_title("Stencil Truncation vs. Floating-Point Roundoff Scaling")
 axes[0].legend(fontsize=8.3)
 axes[0].grid(alpha=0.3, which="both")
 
-axes[1].scatter(np.arcsinh(K_exact_gauss.numpy()), np.arcsinh(K_fd_opt.numpy()), s=20, alpha=0.75, color="#2ca02c", label="Approach 1: 7-pt FD Stencil ($h=2\\times 10^{-3}$)")
+axes[1].scatter(np.arcsinh(K_exact_gauss.numpy()), np.arcsinh(K_fd_opt.numpy()), s=20, alpha=0.75, color="#2ca02c", label=r"Approach 1: 7-pt FD Stencil ($h=2\times 10^{-3}$)")
 axes[1].scatter(np.arcsinh(K_exact_gauss.numpy()), np.arcsinh(K_knn_est.numpy()), s=20, alpha=0.65, color="#ff7f0e", marker="^", label="Approach 2: 1N Point-Cloud $k$-NN Jet")
 lim_v = max(np.abs(np.arcsinh(K_exact_gauss.numpy())).max() * 1.1, 1.0)
 axes[1].plot([-lim_v, lim_v], [-lim_v, lim_v], "k--", lw=1.4, label="Exact Identity $y = x$")
-axes[1].set_xlabel(r"Exact Analytical $\mathrm{arcsinh}(K^{(5)}(x))$")
-axes[1].set_ylabel(r"1st-Order Approximated $\mathrm{arcsinh}(\hat{K}^{(5)}(x))$")
+axes[1].set_xlabel(rf"Exact Analytical $\mathrm{{arcsinh}}(K^{{({L_ref})}}(x))$")
+axes[1].set_ylabel(rf"1st-Order Approximated $\mathrm{{arcsinh}}(\hat{{K}}^{{({L_ref})}}(x))$")
 axes[1].set_title("Pointwise Curvature Fidelity on Trained Network")
 axes[1].legend(fontsize=8.3)
 axes[1].grid(alpha=0.3)
@@ -2532,10 +2824,7 @@ plt.show()
             "source": r"""
 ## 2. Step-Level Compute, Memory & Autograd Graph Benchmark (vs. `SGD` Cross-Entropy Baseline)
 
-We benchmark a complete **forward + backward + `SGD.step()`** iteration (`N = 220` points on `[2 -> 5 -> 10 -> 15 -> 10 -> 2]`) across **14 configurations**, anchored by **`SGD + Cross-Entropy`** (`1st-Order` reference):
-- **Step Latency (`ms / step`)** averaged over 25 timed `SGD` iterations.
-- **CPU Tensor Memory Allocated (`MB / step`)** captured via `torch.profiler.profile(..., profile_memory=True)`.
-- **Autograd Computation Graph Size (`# grad_fn nodes`)** retained for reverse-mode backpropagation.
+We benchmark a complete **forward + backward + `SGD.step()`** iteration across **14 configurations**, anchored by **`SGD + Cross-Entropy`** (`1st-Order` reference).
 """,
         },
         {
@@ -2557,14 +2846,12 @@ def count_autograd_nodes(grad_fn) -> int:
 def benchmark_sgd_step(loss_fn, model: MoonsMLP, n_repeats: int = 25):
     sgd = torch.optim.SGD(model.parameters(), lr=1e-4)
 
-    # Warmup & count autograd graph nodes
     sgd.zero_grad()
     l_warm = loss_fn()
     n_nodes = count_autograd_nodes(l_warm.grad_fn)
     l_warm.backward()
     sgd.step()
 
-    # Profile tensor memory allocated during one full SGD step
     with profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof:
         sgd.zero_grad()
         l_mem = loss_fn()
@@ -2572,7 +2859,6 @@ def benchmark_sgd_step(loss_fn, model: MoonsMLP, n_repeats: int = 25):
         sgd.step()
     mem_mb = sum(e.cpu_memory_usage for e in prof.key_averages() if e.cpu_memory_usage > 0) / (1024.0 * 1024.0)
 
-    # Time repeated SGD steps
     t0 = time.perf_counter()
     for _ in range(n_repeats):
         sgd.zero_grad()
@@ -2583,33 +2869,34 @@ def benchmark_sgd_step(loss_fn, model: MoonsMLP, n_repeats: int = 25):
     return step_ms, mem_mb, n_nodes
 
 
-bench_net = MoonsMLP(activation="tanh", seed=7)
+bench_net_ce = MoonsMLP(layer_dims=CE_LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
+bench_net = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
+L = bench_net.num_layers
 rng_probe = torch.Generator().manual_seed(42)
 
 BENCHMARK_SUITE = [
-    # (Group, Label, Order, BatchMult, LossBuilder, Color)
-    ("Baseline", "SGD + Cross-Entropy", "1st", "1N", lambda: ce_loss_fn(bench_net(X_train), y_train), "#111111"),
+    ("Baseline", "SGD + Cross-Entropy", "1st", "1N", bench_net_ce, lambda: ce_loss_fn(bench_net_ce(X_train), y_train), "#111111"),
     # Volume-Element Loss
-    ("Volume", "Vol: Exact 2nd-Order Autodiff", "2nd", "jacrev", lambda: volume_contrastive_loss(compute_layer_pullback_metric(bench_net, X_train, 5, "euclidean", 1e-6, params=dict(bench_net.named_parameters())), y_train, 0.60)[0], "#8c564b"),
-    ("Volume", "Vol: App1 (3-pt FD Stencil)", "1st", "3N", lambda: volume_contrastive_loss(compute_fd_pullback_metric(bench_net, X_train, metric_mode="euclidean"), y_train, 0.60)[0], "#1f77b4"),
-    ("Volume", "Vol: App2 (1N k-NN Linear)", "1st", "1N", lambda: volume_contrastive_loss(compute_knn_jet_geometry(bench_net, X_train, knn_idx_lin, knn_op_lin, metric_mode="euclidean")[0], y_train, 0.60)[0], "#2ca02c"),
-    ("Volume", "Vol: App3 (2-Probe Sketch)", "1st", "3N", lambda: volume_contrastive_loss(compute_sketched_pullback_metric(bench_net, X_train, n_probes=2, metric_mode="euclidean", generator=rng_probe)[0], y_train, 0.60)[0], "#9467bd"),
+    ("Volume", "Vol: Exact 2nd-Order Autodiff", "2nd", "jacrev", bench_net, lambda: volume_contrastive_loss(compute_layer_pullback_metric(bench_net, X_train, L, "euclidean", 1e-6, params=dict(bench_net.named_parameters())), y_train, 0.60, n_classes=N_CLASSES)[0], "#8c564b"),
+    ("Volume", "Vol: App1 (3-pt FD Stencil)", "1st", "3N", bench_net, lambda: volume_contrastive_loss(compute_fd_pullback_metric(bench_net, X_train, metric_mode="euclidean"), y_train, 0.60, n_classes=N_CLASSES)[0], "#1f77b4"),
+    ("Volume", "Vol: App2 (1N k-NN Linear)", "1st", "1N", bench_net, lambda: volume_contrastive_loss(compute_knn_jet_geometry(bench_net, X_train, knn_idx_lin, knn_op_lin, metric_mode="euclidean")[0], y_train, 0.60, n_classes=N_CLASSES)[0], "#2ca02c"),
+    ("Volume", "Vol: App3 (2-Probe Sketch)", "1st", "3N", bench_net, lambda: volume_contrastive_loss(compute_sketched_pullback_metric(bench_net, X_train, n_probes=2, metric_mode="euclidean", generator=rng_probe)[0], y_train, 0.60, n_classes=N_CLASSES)[0], "#9467bd"),
     # Metric Anisotropy Loss
-    ("Anisotropy", "Aniso: Exact 2nd-Order Autodiff", "2nd", "jacrev", lambda: anisotropy_margin_loss(compute_layer_pullback_metric(bench_net, X_train, 5, "graph", params=dict(bench_net.named_parameters())), y_train, 0.45)[0], "#8c564b"),
-    ("Anisotropy", "Aniso: App1 (3-pt FD Stencil)", "1st", "3N", lambda: anisotropy_margin_loss(compute_fd_pullback_metric(bench_net, X_train, metric_mode="graph"), y_train, 0.45)[0], "#1f77b4"),
-    ("Anisotropy", "Aniso: App2 (1N k-NN Linear)", "1st", "1N", lambda: anisotropy_margin_loss(compute_knn_jet_geometry(bench_net, X_train, knn_idx_lin, knn_op_lin, metric_mode="graph")[0], y_train, 0.45)[0], "#2ca02c"),
-    ("Anisotropy", "Aniso: App3 (1-Probe Hutch.)", "1st", "2N", lambda: anisotropy_margin_loss(compute_sketched_pullback_metric(bench_net, X_train, n_probes=1, metric_mode="graph", generator=rng_probe)[0], y_train, 0.45)[0], "#9467bd"),
+    ("Anisotropy", "Aniso: Exact 2nd-Order Autodiff", "2nd", "jacrev", bench_net, lambda: anisotropy_margin_loss(compute_layer_pullback_metric(bench_net, X_train, L, "graph", params=dict(bench_net.named_parameters())), y_train, 0.45, n_classes=N_CLASSES)[0], "#8c564b"),
+    ("Anisotropy", "Aniso: App1 (3-pt FD Stencil)", "1st", "3N", bench_net, lambda: anisotropy_margin_loss(compute_fd_pullback_metric(bench_net, X_train, metric_mode="graph"), y_train, 0.45, n_classes=N_CLASSES)[0], "#1f77b4"),
+    ("Anisotropy", "Aniso: App2 (1N k-NN Linear)", "1st", "1N", bench_net, lambda: anisotropy_margin_loss(compute_knn_jet_geometry(bench_net, X_train, knn_idx_lin, knn_op_lin, metric_mode="graph")[0], y_train, 0.45, n_classes=N_CLASSES)[0], "#2ca02c"),
+    ("Anisotropy", "Aniso: App3 (1-Probe Hutch.)", "1st", "2N", bench_net, lambda: anisotropy_margin_loss(compute_sketched_pullback_metric(bench_net, X_train, n_probes=1, metric_mode="graph", generator=rng_probe)[0], y_train, 0.45, n_classes=N_CLASSES)[0], "#9467bd"),
     # Gaussian Curvature Loss
-    ("Curvature", "Curv: Exact 3rd-Order (Levi-Civ.)", "3rd", "jacrev^3", lambda: (lambda g: curvature_margin_loss(g["K"], y_train, g["g"], margin=0.40)[0])(compute_layer_geometry(bench_net, X_train, 5, "graph", params=dict(bench_net.named_parameters()))), "#d62728"),
-    ("Curvature", "Curv: App4 (Exact Gauss Eq.)", "3rd", "jacfwd^2", lambda: (lambda gK: curvature_margin_loss(gK[1], y_train, gK[0], margin=0.40)[0])(compute_fast_graph_geometry(bench_net, X_train, params=dict(bench_net.named_parameters()))), "#ff7f0e"),
-    ("Curvature", "Curv: App1 (7-pt FD Stencil)", "1st", "7N", lambda: (lambda gK: curvature_margin_loss(gK[1], y_train, gK[0], margin=0.40)[0])(compute_fd_graph_curvature(bench_net, X_train)), "#1f77b4"),
-    ("Curvature", "Curv: App2 (1N k-NN Quad Jet)", "1st", "1N", lambda: (lambda gK: curvature_margin_loss(gK[1], y_train, gK[0], margin=0.40)[0])(compute_knn_jet_geometry(bench_net, X_train, knn_idx_quad, knn_op_quad, metric_mode="graph")), "#2ca02c"),
-    ("Curvature", "Curv: App3 (Random 2-Plane)", "1st", "7N", lambda: (lambda gK: curvature_margin_loss(gK[1], y_train, gK[0], margin=0.40)[0])(compute_sketched_plane_curvature(bench_net, X_train, generator=rng_probe)), "#9467bd"),
+    ("Curvature", "Curv: Exact 3rd-Order (Levi-Civ.)", "3rd", "jacrev^3", bench_net, lambda: (lambda g: curvature_margin_loss(g["K"], y_train, g["g"], margin=0.40, n_classes=N_CLASSES)[0])(compute_layer_geometry(bench_net, X_train, L, "graph", params=dict(bench_net.named_parameters()))), "#d62728"),
+    ("Curvature", "Curv: App4 (Exact Gauss Eq.)", "3rd", "jacfwd^2", bench_net, lambda: (lambda gK: curvature_margin_loss(gK[1], y_train, gK[0], margin=0.40, n_classes=N_CLASSES)[0])(compute_fast_graph_geometry(bench_net, X_train, params=dict(bench_net.named_parameters()))), "#ff7f0e"),
+    ("Curvature", "Curv: App1 (7-pt FD Stencil)", "1st", "7N", bench_net, lambda: (lambda gK: curvature_margin_loss(gK[1], y_train, gK[0], margin=0.40, n_classes=N_CLASSES)[0])(compute_fd_graph_curvature(bench_net, X_train)), "#1f77b4"),
+    ("Curvature", "Curv: App2 (1N k-NN Quad Jet)", "1st", "1N", bench_net, lambda: (lambda gK: curvature_margin_loss(gK[1], y_train, gK[0], margin=0.40, n_classes=N_CLASSES)[0])(compute_knn_jet_geometry(bench_net, X_train, knn_idx_quad, knn_op_quad, metric_mode="graph")), "#2ca02c"),
+    ("Curvature", "Curv: App3 (Random 2-Plane)", "1st", "7N", bench_net, lambda: (lambda gK: curvature_margin_loss(gK[1], y_train, gK[0], margin=0.40, n_classes=N_CLASSES)[0])(compute_sketched_plane_curvature(bench_net, X_train, generator=rng_probe)), "#9467bd"),
 ]
 
 bench_records = []
-for grp, lbl, order_str, bmult, fn, col in BENCHMARK_SUITE:
-    ms, mb, nodes = benchmark_sgd_step(fn, bench_net)
+for grp, lbl, order_str, bmult, net_m, fn, col in BENCHMARK_SUITE:
+    ms, mb, nodes = benchmark_sgd_step(fn, net_m)
     bench_records.append({
         "group": grp,
         "label": lbl,
@@ -2639,7 +2926,6 @@ for rec in bench_records:
         f"{rec['mb']:11.2f} | {msave:8.1f}x | {rec['nodes']:6d}"
     )
 
-# Visualize Curvature + Volume + SGD-CE Compute & Memory Pareto Comparison
 plot_subset = [bench_records[i] for i in [0, 1, 2, 3, 9, 10, 11, 12, 13]]
 short_labels = [
     "SGD + CE\n(1st, 1N)",
@@ -2659,7 +2945,6 @@ cols_sub = [r["color"] for r in plot_subset]
 ms_sub = [r["ms"] for r in plot_subset]
 mb_sub = [r["mb"] for r in plot_subset]
 
-# Panel 1: Step Latency
 bars0 = axes[0].barh(y_idx, ms_sub, color=cols_sub, edgecolor="k", alpha=0.88, height=0.65)
 axes[0].set_xscale("log")
 axes[0].set_yticks(y_idx)
@@ -2672,7 +2957,6 @@ axes[0].grid(axis="x", alpha=0.3, which="both")
 for b, v in zip(bars0, ms_sub):
     axes[0].text(v * 1.12, b.get_y() + b.get_height() / 2, f"{v:.2f} ms", va="center", fontsize=8, fontweight="bold")
 
-# Panel 2: Step Memory
 bars1 = axes[1].barh(y_idx, mb_sub, color=cols_sub, edgecolor="k", alpha=0.88, height=0.65)
 axes[1].set_xscale("log")
 axes[1].set_yticks(y_idx)
@@ -2685,7 +2969,6 @@ axes[1].grid(axis="x", alpha=0.3, which="both")
 for b, v in zip(bars1, mb_sub):
     axes[1].text(v * 1.12, b.get_y() + b.get_height() / 2, f"{v:.2f} MB", va="center", fontsize=8, fontweight="bold")
 
-# Panel 3: Compute vs Memory Pareto Frontier
 for rec in bench_records:
     marker = "*" if rec["group"] == "Baseline" else ("D" if rec["order"] != "1st" else "o")
     sz = 220 if rec["group"] == "Baseline" else max(rec["nodes"] * 0.22, 65)
@@ -2714,34 +2997,40 @@ plt.show()
             "source": r"""
 ## 3. End-to-End `SGD` Training Convergence & Exact Analytical Test Accuracy
 
-A critical validation question is whether networks trained *exclusively* using 1st-order spatial approximations genuinely sculpt the **exact continuous differential geometry** of the manifold.
-
-Below we train **every method using `torch.optim.SGD` (`momentum = 0.9`)** from the same initialization (`seed = 7`) alongside the **`SGD + Cross-Entropy` baseline**, and evaluate held-out test accuracy at every checkpoint using the **exact analytical differential-geometric operators** (`compute_layer_pullback_metric` and `compute_fast_graph_geometry`).
+Below we train **every method using `torch.optim.SGD` (`momentum = 0.9`)** from the same initialization (`seed = 7`) alongside the **`SGD + Cross-Entropy` baseline**, and evaluate held-out test accuracy at every checkpoint using the **exact analytical differential-geometric operators**.
 """,
         },
         {
             "type": "code",
             "source": r"""
 def exact_test_accuracy(mdl: MoonsMLP, task: str) -> float:
+    l_out = mdl.num_layers
     with torch.no_grad():
         if task == "ce":
             return (mdl(X_test).argmax(dim=-1) == y_test).float().mean().item() * 100.0
         if task == "volume":
-            g = compute_layer_pullback_metric(mdl, X_test, layer_idx=5, metric_mode="euclidean", eps=1e-6)
+            g = compute_layer_pullback_metric(mdl, X_test, layer_idx=l_out, metric_mode="euclidean", eps=1e-6)
             lv = 0.5 * torch.log(torch.clamp(torch.linalg.det(g), min=1e-8))
-            return ((lv > 0.0).long() == y_test).float().mean().item() * 100.0
+            return (scalar_geometric_predict(lv, n_classes=N_CLASSES, margin=0.60) == y_test).float().mean().item() * 100.0
         if task == "anisotropy":
-            g = compute_layer_pullback_metric(mdl, X_test, layer_idx=5, metric_mode="graph")
+            g = compute_layer_pullback_metric(mdl, X_test, layer_idx=l_out, metric_mode="graph")
             lr = torch.log(torch.clamp(g[:, 0, 0], min=1e-8) / torch.clamp(g[:, 1, 1], min=1e-8))
-            return ((lr > 0.0).long() == y_test).float().mean().item() * 100.0
+            return (scalar_geometric_predict(lr, n_classes=N_CLASSES, margin=0.45) == y_test).float().mean().item() * 100.0
         if task == "curvature":
             _, K = compute_fast_graph_geometry(mdl, X_test)
-            return ((K > 0.0).long() == y_test).float().mean().item() * 100.0
+            return (scalar_geometric_predict(K, n_classes=N_CLASSES, margin=0.40) == y_test).float().mean().item() * 100.0
     raise ValueError(task)
 
 
 def run_sgd_training(task: str, approx_mode: str, epochs: int = 120, lr: float = 0.06, seed: int = 7):
-    mdl = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=seed)
+    dims_use = CE_LAYER_DIMS if task == "ce" else LAYER_DIMS
+    mdl = MoonsMLP(
+        layer_dims=dims_use,
+        activation=HIDDEN_ACTIVATION,
+        output_activation=OUTPUT_ACTIVATION,
+        seed=seed,
+    )
+    l_out = mdl.num_layers
     opt = torch.optim.SGD(mdl.parameters(), lr=lr, momentum=0.9)
     rng = torch.Generator().manual_seed(seed + 100)
 
@@ -2756,27 +3045,27 @@ def run_sgd_training(task: str, approx_mode: str, epochs: int = 120, lr: float =
             loss = ce_loss_fn(mdl(X_train), y_train)
         elif task == "volume":
             if approx_mode == "exact":
-                g = compute_layer_pullback_metric(mdl, X_train, 5, "euclidean", 1e-6, params=dict(mdl.named_parameters()))
+                g = compute_layer_pullback_metric(mdl, X_train, l_out, "euclidean", 1e-6, params=dict(mdl.named_parameters()))
             elif approx_mode == "app1_fd":
                 g = compute_fd_pullback_metric(mdl, X_train, metric_mode="euclidean")
             elif approx_mode == "app2_knn":
                 g, _ = compute_knn_jet_geometry(mdl, X_train, knn_idx_lin, knn_op_lin, metric_mode="euclidean")
             elif approx_mode == "app3_sketch":
                 g, _ = compute_sketched_pullback_metric(mdl, X_train, n_probes=2, metric_mode="euclidean", generator=rng)
-            loss, _ = volume_contrastive_loss(g, y_train, margin=0.60)
+            loss, _ = volume_contrastive_loss(g, y_train, margin=0.60, n_classes=N_CLASSES)
         elif task == "anisotropy":
             if approx_mode == "exact":
-                g = compute_layer_pullback_metric(mdl, X_train, 5, "graph", params=dict(mdl.named_parameters()))
+                g = compute_layer_pullback_metric(mdl, X_train, l_out, "graph", params=dict(mdl.named_parameters()))
             elif approx_mode == "app1_fd":
                 g = compute_fd_pullback_metric(mdl, X_train, metric_mode="graph")
             elif approx_mode == "app2_knn":
                 g, _ = compute_knn_jet_geometry(mdl, X_train, knn_idx_lin, knn_op_lin, metric_mode="graph")
             elif approx_mode == "app3_sketch":
                 g, _ = compute_sketched_pullback_metric(mdl, X_train, n_probes=1, metric_mode="graph", generator=rng)
-            loss, _ = anisotropy_margin_loss(g, y_train, margin=0.45)
+            loss, _ = anisotropy_margin_loss(g, y_train, margin=0.45, n_classes=N_CLASSES)
         elif task == "curvature":
             if approx_mode == "exact_levi":
-                gm = compute_layer_geometry(mdl, X_train, 5, "graph", params=dict(mdl.named_parameters()))
+                gm = compute_layer_geometry(mdl, X_train, l_out, "graph", params=dict(mdl.named_parameters()))
                 g, K = gm["g"], gm["K"]
             elif approx_mode == "app4_gauss":
                 g, K = compute_fast_graph_geometry(mdl, X_train, params=dict(mdl.named_parameters()))
@@ -2786,7 +3075,7 @@ def run_sgd_training(task: str, approx_mode: str, epochs: int = 120, lr: float =
                 g, K = compute_knn_jet_geometry(mdl, X_train, knn_idx_quad, knn_op_quad, metric_mode="graph")
             elif approx_mode == "app3_sketch":
                 g, K = compute_sketched_plane_curvature(mdl, X_train, generator=rng)
-            loss, _ = curvature_margin_loss(K, y_train, g, margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0)
+            loss, _ = curvature_margin_loss(K, y_train, g, margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0, n_classes=N_CLASSES)
         else:
             raise ValueError(task)
 
@@ -2849,16 +3138,14 @@ for t_name, specs in TRAINING_MATRIX.items():
         print(f"{f'{t_name.capitalize()} — {label}':<44} | {h_tr['total_ms']:15.1f} | {f'{rel_time:.2f}x':>14} | {h_tr['acc'][-1]:24.2f}%")
     print("-" * 108)
 
-# Plot 2x3 Grid: Row 0 = Test Acc vs Epoch; Row 1 = Test Acc vs Wall-Clock Time (ms, log scale)
 fig, axes = plt.subplots(2, 3, figsize=(17.0, 7.8))
 task_titles = {
-    "volume": r"Volume-Element ($\log\sqrt{\det g^{(5)}} > 0$)",
-    "anisotropy": r"Metric Anisotropy ($\log(\tilde{g}_{11}/\tilde{g}_{22}) > 0$)",
-    "curvature": r"Gaussian Curvature ($K^{(5)} > 0$)",
+    "volume": rf"Volume-Element ($\log\sqrt{{\det g^{{({L})}}}}$)",
+    "anisotropy": r"Metric Anisotropy ($\log(\tilde{g}_{11}/\tilde{g}_{22})$)",
+    "curvature": rf"Gaussian Curvature ($K^{{({L})}}$)",
 }
 
 for col_idx, t_name in enumerate(["volume", "anisotropy", "curvature"]):
-    # Reference SGD + Cross-Entropy curve
     axes[0, col_idx].plot(ce_hist["epochs"], ce_hist["acc"], "k:", lw=2.0, label="Baseline: SGD + Cross-Entropy")
     axes[1, col_idx].plot(np.maximum(ce_hist["time_ms"], 1.0), ce_hist["acc"], "k:", lw=2.0, label="Baseline: SGD + Cross-Entropy")
 
@@ -2868,13 +3155,13 @@ for col_idx, t_name in enumerate(["volume", "anisotropy", "curvature"]):
 
     axes[0, col_idx].set_title(task_titles[t_name])
     axes[0, col_idx].set_xlabel("SGD Training Epoch")
-    axes[0, col_idx].set_ylim(38.0, 102.5)
+    axes[0, col_idx].set_ylim(min(38.0, 100.0 / N_CLASSES - 10.0), 102.5)
     axes[0, col_idx].grid(alpha=0.3)
     axes[0, col_idx].legend(fontsize=7.6, loc="lower right")
 
     axes[1, col_idx].set_xscale("log")
     axes[1, col_idx].set_xlabel("Cumulative Wall-Clock Training Time (ms, log scale)")
-    axes[1, col_idx].set_ylim(38.0, 102.5)
+    axes[1, col_idx].set_ylim(min(38.0, 100.0 / N_CLASSES - 10.0), 102.5)
     axes[1, col_idx].grid(alpha=0.3, which="both")
 
 axes[0, 0].set_ylabel("Exact Analytical Test Accuracy (%)")
@@ -2889,7 +3176,7 @@ plt.show()
             "source": r"""
 ## 4. Exact Analytical Decision Landscapes Learned via 1st-Order Approximations
 
-To confirm visually that models trained purely with 1st-order stencils, `1N` $k$-NN jets, and randomized tangent sketches learn genuine smooth differential-geometric fields (without high-frequency artifacts), we evaluate the **exact analytical** log-volume field $\log\sqrt{\det g^{(5)}(x)}$ (Row 0) and **exact analytical** Gaussian curvature $\mathrm{arcsinh}(K^{(5)}(x))$ (Row 1) across the ambient 2D plane.
+We evaluate the **exact analytical** log-volume field $\log\sqrt{\det g^{(L)}(x)}$ (Row 0) and **exact analytical** Gaussian curvature $\mathrm{arcsinh}(K^{(L)}(x))$ (Row 1) across the ambient 2D plane.
 """,
         },
         {
@@ -2913,14 +3200,15 @@ curv_cols = [
 for c_idx, (m_key, c_title) in enumerate(vol_cols):
     mdl, h_tr, _, _, _ = trained_models["volume"][m_key]
     with torch.no_grad():
-        g_grid = compute_layer_pullback_metric(mdl, grid_pts, layer_idx=5, metric_mode="euclidean", eps=1e-6)
+        g_grid = compute_layer_pullback_metric(mdl, grid_pts, layer_idx=mdl.num_layers, metric_mode="euclidean", eps=1e-6)
         fld = (0.5 * torch.log(torch.clamp(torch.linalg.det(g_grid), min=1e-8))).numpy().reshape(xx.shape)
     vm = float(max(np.percentile(np.abs(fld), 96), 0.25))
     im = axes[0, c_idx].contourf(xx, yy, fld, levels=np.linspace(-vm, vm, 25), cmap="RdBu_r", norm=TwoSlopeNorm(vmin=-vm, vcenter=0.0, vmax=vm), extend="both")
     if fld.min() < 0.0 < fld.max():
         axes[0, c_idx].contour(xx, yy, fld, levels=[0.0], colors="k", linewidths=1.8)
-    axes[0, c_idx].scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", edgecolors="w", s=18)
-    axes[0, c_idx].scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", edgecolors="w", s=18)
+    for c in range(N_CLASSES):
+        mc = y_test == c
+        axes[0, c_idx].scatter(X_test[mc, 0], X_test[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolors="w", s=18)
     axes[0, c_idx].set_title(f"{c_title}\nExact Acc: {h_tr['acc'][-1]:.1f}% ({h_tr['total_ms']:.0f} ms)", fontsize=9.5)
     plt.colorbar(im, ax=axes[0, c_idx], fraction=0.046)
 
@@ -2933,14 +3221,15 @@ for c_idx, (m_key, c_title) in enumerate(curv_cols):
     im = axes[1, c_idx].contourf(xx, yy, fld, levels=np.linspace(-vm, vm, 25), cmap="RdBu_r", norm=TwoSlopeNorm(vmin=-vm, vcenter=0.0, vmax=vm), extend="both")
     if fld.min() < 0.0 < fld.max():
         axes[1, c_idx].contour(xx, yy, fld, levels=[0.0], colors="k", linewidths=1.8)
-    axes[1, c_idx].scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", edgecolors="w", s=18)
-    axes[1, c_idx].scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", edgecolors="w", s=18)
+    for c in range(N_CLASSES):
+        mc = y_test == c
+        axes[1, c_idx].scatter(X_test[mc, 0], X_test[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolors="w", s=18)
     axes[1, c_idx].set_title(f"{c_title}\nExact Acc: {h_tr['acc'][-1]:.1f}% ({h_tr['total_ms']:.0f} ms)", fontsize=9.5)
     axes[1, c_idx].set_xlabel("$x^1$")
     plt.colorbar(im, ax=axes[1, c_idx], fraction=0.046)
 
-axes[0, 0].set_ylabel("Exact Log Volume\n" + r"$\log\sqrt{\det g^{(5)}(x)}$" + "\n$x^2$")
-axes[1, 0].set_ylabel("Exact Curvature\n" + r"$\mathrm{arcsinh}(K^{(5)}(x))$" + "\n$x^2$")
+axes[0, 0].set_ylabel("Exact Log Volume\n" + rf"$\log\sqrt{{\det g^{{({L})}}(x)}}$" + "\n$x^2$")
+axes[1, 0].set_ylabel("Exact Curvature\n" + rf"$\mathrm{{arcsinh}}(K^{{({L})}}(x))$" + "\n$x^2$")
 plt.suptitle("Exact Analytical Geometric Landscapes Learned via Exact vs. First-Order Approximated SGD Training", y=1.02, fontsize=13)
 plt.tight_layout()
 plt.show()
@@ -2950,10 +3239,6 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 5. High-Dimensional Input Scaling ($d_0 = 2 \to 128$): Why Randomized Tangent Sketching Wins
-
-On 2D inputs (`make_moons`, $d_0 = 2$), coordinate finite-difference stencils require only `3N` or `7N` forward evaluations. In high-dimensional input spaces ($d_0 \gg 2$), however:
-- **Exact Pullback Autodiff** (`jacrev`/`jacfwd` wrt $x \in \mathbb{R}^{d_0}$) and **Full Coordinate FD Stencils** (`(d_0 + 1)N` evaluations) grow linearly or quadratically with $d_0$.
-- **Approach 3 (Randomized Tangent-Plane Sketching)** evaluates `2N` (1-probe trace/metric) or `7N` (random 2-plane sectional curvature) points **regardless of $d_0$**, remaining parallel to `SGD + Cross-Entropy` across arbitrary input dimensions!
 """,
         },
         {
@@ -2972,49 +3257,49 @@ scaling_res = {
 rng_hd = torch.Generator().manual_seed(77)
 for d0 in dims_to_test:
     X_hd = torch.randn(N_hd, d0, dtype=torch.float64)
-    y_hd = torch.randint(0, 2, (N_hd,))
-    signs_hd = 2.0 * y_hd.to(torch.float64) - 1.0
-    mlp_hd = MoonsMLP(layer_dims=(d0, 16, 16, 2), activation="tanh", seed=7)
+    y_hd = torch.randint(0, N_CLASSES, (N_hd,))
+    mlp_hd = MoonsMLP(
+        layer_dims=(d0, 16, 16, max(LAYER_DIMS[-1], N_CLASSES)),
+        activation=HIDDEN_ACTIVATION,
+        output_activation=OUTPUT_ACTIVATION,
+        seed=7,
+    )
+    l_hd = mlp_hd.num_layers
 
-    # 1. SGD + Cross-Entropy
     ms, mb, _ = benchmark_sgd_step(lambda: ce_loss_fn(mlp_hd(X_hd), y_hd), mlp_hd, n_repeats=12)
     scaling_res["SGD + Cross-Entropy"]["ms"].append(ms)
     scaling_res["SGD + Cross-Entropy"]["mb"].append(mb)
 
-    # 2. Exact 2nd-order metric trace margin loss
     def exact_hd_loss():
-        g = compute_layer_pullback_metric(mlp_hd, X_hd, layer_idx=3, metric_mode="euclidean", eps=1e-6, params=dict(mlp_hd.named_parameters()))
+        g = compute_layer_pullback_metric(mlp_hd, X_hd, layer_idx=l_hd, metric_mode="euclidean", eps=1e-6, params=dict(mlp_hd.named_parameters()))
         tr_log = torch.log(torch.clamp(torch.diagonal(g, dim1=-2, dim2=-1).sum(-1) / d0, min=1e-8))
-        return torch.nn.functional.softplus(0.5 - signs_hd * tr_log).mean()
+        return torch.nn.functional.softplus(0.5 - (2.0 * (y_hd % 2).to(torch.float64) - 1.0) * tr_log).mean()
 
     ms, mb, _ = benchmark_sgd_step(exact_hd_loss, mlp_hd, n_repeats=8)
     scaling_res["Exact Metric Autodiff (2nd)"]["ms"].append(ms)
     scaling_res["Exact Metric Autodiff (2nd)"]["mb"].append(mb)
 
-    # 3. Full Coordinate FD Stencil ((d0 + 1)N)
     def coord_fd_hd_loss():
         g = compute_fd_pullback_metric(mlp_hd, X_hd, metric_mode="euclidean")
         tr_log = torch.log(torch.clamp(torch.diagonal(g, dim1=-2, dim2=-1).sum(-1) / d0, min=1e-8))
-        return torch.nn.functional.softplus(0.5 - signs_hd * tr_log).mean()
+        return torch.nn.functional.softplus(0.5 - (2.0 * (y_hd % 2).to(torch.float64) - 1.0) * tr_log).mean()
 
     ms, mb, _ = benchmark_sgd_step(coord_fd_hd_loss, mlp_hd, n_repeats=8)
     scaling_res["App 1: Full Coord FD ((d0+1)N)"]["ms"].append(ms)
     scaling_res["App 1: Full Coord FD ((d0+1)N)"]["mb"].append(mb)
 
-    # 4. Approach 3: 1-Probe Hutchinson Metric Sketch (2N)
     def sketch1_hd_loss():
         _, g_sub = compute_sketched_pullback_metric(mlp_hd, X_hd, n_probes=1, metric_mode="euclidean", generator=rng_hd)
         tr_log = torch.log(torch.clamp(g_sub[:, 0, 0], min=1e-8))
-        return torch.nn.functional.softplus(0.5 - signs_hd * tr_log).mean()
+        return torch.nn.functional.softplus(0.5 - (2.0 * (y_hd % 2).to(torch.float64) - 1.0) * tr_log).mean()
 
     ms, mb, _ = benchmark_sgd_step(sketch1_hd_loss, mlp_hd, n_repeats=12)
     scaling_res["App 3: 1-Probe Metric Sketch (2N)"]["ms"].append(ms)
     scaling_res["App 3: 1-Probe Metric Sketch (2N)"]["mb"].append(mb)
 
-    # 5. Approach 3: Random 2-Plane Sectional Curvature (7N)
     def sketch_curv_hd_loss():
         g_p, K_p = compute_sketched_plane_curvature(mlp_hd, X_hd, generator=rng_hd)
-        return curvature_margin_loss(K_p, y_hd, g_p, margin=0.40)[0]
+        return curvature_margin_loss(K_p, y_hd, g_p, margin=0.40, n_classes=N_CLASSES)[0]
 
     ms, mb, _ = benchmark_sgd_step(sketch_curv_hd_loss, mlp_hd, n_repeats=12)
     scaling_res["App 3: Random 2-Plane Curv. (7N)"]["ms"].append(ms)
@@ -3034,8 +3319,8 @@ for i, d0 in enumerate(dims_to_test):
 
 fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.4))
 for name, d in scaling_res.items():
-    axes[0].plot(dims_to_test, d["ms"], "o-", color=d["col"], ls=d["ls"], lw=2.1, label=name)
-    axes[1].plot(dims_to_test, d["mb"], "s-", color=d["col"], ls=d["ls"], lw=2.1, label=name)
+    axes[0].plot(dims_to_test, d["ms"], marker="o", color=d["col"], ls=d["ls"], lw=2.1, label=name)
+    axes[1].plot(dims_to_test, d["mb"], marker="s", color=d["col"], ls=d["ls"], lw=2.1, label=name)
 
 for ax, ylabel, title in [
     (axes[0], "Step Latency (ms / SGD step)", "Compute Scaling vs. Ambient Input Dimension $d_0$"),
@@ -3059,12 +3344,6 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 6. Matrix-Free Woodbury Coupled Natural Gradient (`O(S^2 P)` + 1st-Order Stencils)
-
-Finally, connecting back to **Notebook 06**, we show how **Coupled Geometric Natural Gradient** can also be accelerated by combining:
-1. **Approach 1 (7-pt 1st-Order FD Curvature Stencil)** for both the gradient and parameter-metric residuals, and
-2. **Subsampled Matrix-Free Woodbury Inversion** (`woodbury_coupled_ngd_direction` on $S = 16$ active points, $R = 4S = 64 \ll P = 422$):
-   $$\big(\lambda I_P + \tfrac{1}{S} U^T U\big)^{-1} g = \frac{1}{\lambda}\!\left(g - U^T (\lambda S I_R + U U^T)^{-1} U g\right)$$
-   which never allocates a $P \times P$ matrix and cuts coupled curvature NGD latency and memory dramatically while preserving fast natural-gradient convergence.
 """,
         },
         {
@@ -3077,30 +3356,37 @@ def compare_dense_vs_woodbury_coupled_ngd(n_steps: int = 35):
     for mode, label, col, ls in [
         ("sgd_fd", "Uncoupled SGD + 7-pt FD (1st)", "#7f7f7f", ":"),
         ("woodbury_fd", "Woodbury Coupled NGD (S=16, 7-pt FD)", "#1f77b4", "--"),
-        ("dense_exact", "Dense Coupled NGD (N=220, Exact Gauss)", "#2ca02c", "-"),
+        ("dense_exact", "Dense Coupled NGD (Exact Gauss)", "#2ca02c", "-"),
     ]:
-        mdl = MoonsMLP(activation="tanh", seed=7)
-        sgd_opt = torch.optim.SGD(mdl.parameters(), lr=0.045, momentum=0.9) if mode == "sgd_fd" else None
+        mdl = MoonsMLP(
+            layer_dims=LAYER_DIMS,
+            activation=HIDDEN_ACTIVATION,
+            output_activation=OUTPUT_ACTIVATION,
+            seed=7,
+        )
         losses, accs = [], []
 
-        # Profile single step memory
         with profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof:
             mdl.zero_grad()
             if mode == "dense_exact":
                 g_m, K_m = compute_fast_graph_geometry(mdl, X_train, params=dict(mdl.named_parameters()))
             else:
                 g_m, K_m = compute_fd_graph_curvature(mdl, X_train)
-            l_m, _ = curvature_margin_loss(K_m, y_train, g_m, margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0)
+            l_m, _ = curvature_margin_loss(K_m, y_train, g_m, margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0, n_classes=N_CLASSES)
             l_m.backward()
             if mode == "dense_exact":
-                _ = compute_coupled_geometric_metric(mdl, X_train, y_train, task="curvature", margin=0.40, damping=0.025)
+                _ = compute_coupled_geometric_metric(mdl, X_train, y_train, task="curvature", margin=0.40, damping=0.025, n_classes=N_CLASSES)
             elif mode == "woodbury_fd":
                 gf = torch.cat([p.grad.reshape(-1) if p.grad is not None else torch.zeros(p.numel(), dtype=X_train.dtype) for p in mdl.parameters()])
-                _ = woodbury_coupled_ngd_direction(mdl, X_train[:16], y_train[:16], gf, task="curvature", margin=0.40)
+                _ = woodbury_coupled_ngd_direction(mdl, X_train[:16], y_train[:16], gf, task="curvature", margin=0.40, n_classes=N_CLASSES)
         mem_mb = sum(e.cpu_memory_usage for e in prof.key_averages() if e.cpu_memory_usage > 0) / (1024.0 * 1024.0)
 
-        # Reset and run timed optimization
-        mdl = MoonsMLP(activation="tanh", seed=7)
+        mdl = MoonsMLP(
+            layer_dims=LAYER_DIMS,
+            activation=HIDDEN_ACTIVATION,
+            output_activation=OUTPUT_ACTIVATION,
+            seed=7,
+        )
         sgd_opt = torch.optim.SGD(mdl.parameters(), lr=0.045, momentum=0.9) if mode == "sgd_fd" else None
         t0 = time.perf_counter()
 
@@ -3110,7 +3396,7 @@ def compare_dense_vs_woodbury_coupled_ngd(n_steps: int = 35):
                 g_tr, K_tr = compute_fast_graph_geometry(mdl, X_train, params=dict(mdl.named_parameters()))
             else:
                 g_tr, K_tr = compute_fd_graph_curvature(mdl, X_train)
-            loss, _ = curvature_margin_loss(K_tr, y_train, g_tr, margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0)
+            loss, _ = curvature_margin_loss(K_tr, y_train, g_tr, margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0, n_classes=N_CLASSES)
             losses.append(loss.item())
             accs.append(exact_test_accuracy(mdl, "curvature"))
             loss.backward()
@@ -3121,7 +3407,7 @@ def compare_dense_vs_woodbury_coupled_ngd(n_steps: int = 35):
             elif mode == "woodbury_fd":
                 gf = torch.cat([p.grad.reshape(-1) if p.grad is not None else torch.zeros(p.numel(), dtype=X_train.dtype) for p in mdl.parameters()])
                 idx_s = torch.randperm(X_train.shape[0], generator=rng_sub)[:16]
-                nat_d, r_norm = woodbury_coupled_ngd_direction(mdl, X_train[idx_s], y_train[idx_s], gf, task="curvature", margin=0.40, damping=0.03)
+                nat_d, r_norm = woodbury_coupled_ngd_direction(mdl, X_train[idx_s], y_train[idx_s], gf, task="curvature", margin=0.40, damping=0.03, n_classes=N_CLASSES)
                 sc = min(1.0, 0.85 / r_norm)
                 with torch.no_grad():
                     off = 0
@@ -3131,7 +3417,7 @@ def compare_dense_vs_woodbury_coupled_ngd(n_steps: int = 35):
                         off += n
             else:
                 gf = torch.cat([p.grad.reshape(-1) if p.grad is not None else torch.zeros(p.numel(), dtype=X_train.dtype) for p in mdl.parameters()])
-                G_d = compute_coupled_geometric_metric(mdl, X_train, y_train, task="curvature", margin=0.40, damping=0.025)
+                G_d = compute_coupled_geometric_metric(mdl, X_train, y_train, task="curvature", margin=0.40, damping=0.025, n_classes=N_CLASSES)
                 nat_d = torch.linalg.solve(G_d, gf)
                 r_norm = torch.sqrt(torch.clamp(nat_d @ (G_d @ nat_d), min=1e-12)).item()
                 sc = min(1.0, 0.85 / r_norm)
@@ -3146,7 +3432,7 @@ def compare_dense_vs_woodbury_coupled_ngd(n_steps: int = 35):
         accs.append(exact_test_accuracy(mdl, "curvature"))
         with torch.no_grad():
             g_f, K_f = compute_fast_graph_geometry(mdl, X_train)
-            losses.append(curvature_margin_loss(K_f, y_train, g_f, margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0)[0].item())
+            losses.append(curvature_margin_loss(K_f, y_train, g_f, margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0, n_classes=N_CLASSES)[0].item())
 
         results_ngd[label] = {"loss": losses, "acc": accs, "ms": ms_per_step, "mb": mem_mb, "col": col, "ls": ls}
         print(f"{label:<40} | {ms_per_step:7.2f} ms/step | {mem_mb:7.2f} MB/step | Final Loss: {losses[-1]:.4f} | Exact Test Acc: {accs[-1]:6.2f}%")
@@ -3170,7 +3456,7 @@ axes[0].grid(alpha=0.3, which="both")
 axes[1].set_xlabel("Optimization Step")
 axes[1].set_ylabel("Exact Analytical Test Accuracy (%)")
 axes[1].set_title("Held-Out Curvature Test Accuracy Trajectory")
-axes[1].set_ylim(45.0, 102.5)
+axes[1].set_ylim(min(45.0, 100.0 / N_CLASSES - 10.0), 102.5)
 axes[1].legend(fontsize=8.3)
 axes[1].grid(alpha=0.3)
 

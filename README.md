@@ -87,10 +87,15 @@ diffgeom/
 
 ---
 
-## Reproducing the Notebooks
+## Notebook Configuration & Reproducibility
 
-All notebooks are pre-executed with embedded outputs and configured for the `lunarpoles` PyTorch kernel (`/opt/conda/envs/lunarpoles/bin/python`). To regenerate and execute all seven notebooks from scratch:
+At the top of the first code cell in every notebook (`01` through `07`), a `# USER CONFIGURATION` block lets you customize:
+1. **Toy Synthetic Dataset (`DATASET_NAME`, `N_CLASSES = 2`, `DATASET_PARAMS`)**: Choose among `"moons"`, `"circles"`, `"blobs"`, `"classification"`, and `"gaussian_quantiles"` from `scikit-learn` along with `noise`, `n_train`, `n_test`, `seed`, `N_CLASSES` (default `2`), and generator-specific options (`factor`, `cluster_std`, `class_sep`, `cov`).
+2. **Layer Architecture (`LAYER_DIMS`)**: Any integer sequence `[input_dim, *hidden_dims, output_dim]` (default `[2, 5, 10, 15, 10, 2]`).
+3. **Hidden & Output Activations (`HIDDEN_ACTIVATION`, `OUTPUT_ACTIVATION`)**: Independently configurable hidden and output nonlinearities (`"tanh"`, `"gelu"`, `"silu"`, `"softplus"`, `"elu"`, `"sigmoid"`, `"sin"`, `"relu"`, `"identity"`, `"softmax"`, `"log_softmax"`).
+
+All notebooks are pre-executed with embedded outputs. To regenerate and execute all seven notebooks from scratch:
 
 ```bash
-/opt/conda/envs/lunarpoles/bin/python scripts/build_all_notebooks.py
+/usr/local/google/home/raulramos/projects/lunarpoles/.venv/bin/python scripts/build_all_notebooks.py
 ```

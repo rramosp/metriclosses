@@ -5,11 +5,14 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import textwrap
 import traceback
 from typing import Any, Dict, List
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig")
 
 import matplotlib
 matplotlib.use("Agg")
