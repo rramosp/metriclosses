@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import platform
 import sys
 import textwrap
 import traceback
@@ -52,7 +53,7 @@ def make_code_cell(
 def build_and_execute_notebook(
     output_path: str | Path,
     cells_spec: List[Dict[str, str]],
-    kernel_name: str = "lunarpoles",
+    kernel_name: str = "diffgeom",
 ) -> None:
     """Execute code cells sequentially in an isolated namespace and write the populated .ipynb file."""
     output_path = Path(output_path)
@@ -140,7 +141,7 @@ def build_and_execute_notebook(
                 "name": "python",
                 "nbconvert_exporter": "python",
                 "pygments_lexer": "ipython3",
-                "version": "3.12.0",
+                "version": platform.python_version(),
             },
         },
         "nbformat": 4,

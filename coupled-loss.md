@@ -673,3 +673,59 @@ Added detailed **`What This Experiment Does`** and **`How to Interpret ...`** su
    - Head-to-head training across Cross-Entropy, Curvature, Volume-Element, and Metric Anisotropy losses, $1 \times 4$ native decision landscapes, layerwise curvature gaps & $P \times P$ parameter metric back-reaction, layerwise log-volume and anisotropy gap tables/profiles, differential-order compute/memory/node benchmarks, and the $3 \times 4$ cross-evaluation selectivity matrix (`★ Target` diagonal vs. off-diagonal controls).
 6. **[notebooks/06-coupled-optimization.ipynb](notebooks/06-coupled-optimization.ipynb) (`Setup + Sections 1–5`)**:
    - Machine-precision Gauss identity check & exact $E(2)$ output translation/rotation quotienting (`|v^T G v|` table and initial spectra), 45-step Coupled Geom-NGD vs. uncoupled optimizers (`GD`, `Adam`, `Coord-NGD`), $3 \times 4$ learned geometric landscapes, mechanistic diagnostics (spurious bias gauge drift & unclipped 3rd-order curvature gradient spikes), and the unsupervised `DeWitt-NGD` vs. `Task-Coupled Geom-NGD` ablation.
+
+
+---
+
+## Turn 19
+
+### User
+make this project into a proper uv python project
+
+### Assistant
+Converted the repository into a standard `src`-layout `uv` Python package (`diffgeom`):
+
+1. **Packaging, Python Pin & Lockfile**:
+   - Added [pyproject.toml](pyproject.toml) (`hatchling` build backend, PEP 621 metadata, runtime dependencies `torch`, `numpy`, `scikit-learn`, `matplotlib`, `pyyaml`, `ipykernel`, dev group `pytest` & `ruff`, and CLI entrypoint `diffgeom-build-notebooks`).
+   - Added [.python-version](.python-version) (`3.13`) and generated [uv.lock](uv.lock) + `.venv/` via `uv sync` with `diffgeom` installed editable.
+2. **Standard `src/diffgeom/` Package Layout**:
+   - Moved library modules into [src/diffgeom/\_\_init\_\_.py](src/diffgeom/__init__.py) and [src/diffgeom/geometry.py](src/diffgeom/geometry.py), and added [src/diffgeom/cli.py](src/diffgeom/cli.py) (`uv run diffgeom-build-notebooks [1..7]`).
+   - Updated all seven notebooks (`01`–`07`), [scripts/build_all_notebooks.py](scripts/build_all_notebooks.py), and [scripts/nb_executor.py](scripts/nb_executor.py) to import from `diffgeom.geometry` and target the `diffgeom` kernelspec.
+3. **Unit Test Suite**:
+   - Added [tests/test_geometry.py](tests/test_geometry.py) covering synthetic dataset generators, sphere/saddle curvature identities, Gauss's equation & $E(2)$ DeWitt nullspace quotienting, custom activations, multiclass geometric losses, and first-order efficient operators (`uv run pytest` passes `5/5` tests).
+4. **Documentation**:
+   - Updated [README.md](README.md) with the new file layout and `uv sync`, `uv run pytest`, and `uv run diffgeom-build-notebooks` commands.
+
+
+---
+
+## Turn 20
+
+### User
+how do I run a jupyter notebook to serve kernels for the ntoebooks in this project
+
+### Assistant
+Added `jupyterlab` and `notebook` to [pyproject.toml](pyproject.toml) (synced into `.venv` and [uv.lock](uv.lock)) and pre-registered the **`Python (diffgeom)`** kernelspec inside `.venv/share/jupyter/kernels/diffgeom` to match the kernelspec of all 7 notebooks.
+
+### 1. Launch Jupyter Notebook (or JupyterLab) from the Project Root
+```bash
+cd /usr/local/google/home/raulramos/projects/diffgeom
+
+# Classic Notebook UI
+uv run jupyter notebook
+
+# Or JupyterLab UI
+uv run jupyter lab
+```
+
+### 2. Running Over SSH / Headless (or Connecting VS Code / Antigravity / Colab to a Kernel Server)
+```bash
+uv run jupyter notebook --no-browser --port 8888
+```
+Then either open via SSH port-forwarding (`ssh -L 8888:127.0.0.1:8888 <host>`) or paste the printed `http://127.0.0.1:8888/?token=...` URL into your IDE's **"Select Kernel -> Existing Jupyter Server"**.
+
+### 3. Selecting `.venv` Directly in VS Code / Antigravity Without Starting a Server
+In the top-right **Select Kernel** picker of any notebook, choose **Python Environments -> `.venv (Python 3.13.13)`** (`/usr/local/google/home/raulramos/projects/diffgeom/.venv/bin/python`), or register it globally in `~/.local/share/jupyter/kernels/` once via:
+```bash
+uv run python -m ipykernel install --user --name diffgeom --display-name "Python (diffgeom)"
+```

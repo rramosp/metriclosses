@@ -27,7 +27,7 @@ This project investigates the differential geometric interplay between two funda
 Standard **Cross-Entropy (`CE`)** classification maps $x \in \mathbb{R}^{d_0} \mapsto z(x) \in \mathbb{R}^{d_L}$ with $d_L \ge C$ coordinate channels (in the notebooks, `CE_LAYER_DIMS` automatically promotes the output width to $\max(d_L, C)$ when `N_CLASSES > LAYER_DIMS[-1]`):
 $$\mathcal{L}_{\mathrm{CE}}(\theta) = -\frac{1}{N} \sum_{n=1}^N \log \frac{\exp(z_{y_n}(x_n))}{\sum_{c=0}^{C-1} \exp(z_c(x_n))}, \qquad \hat{y}(x) = \arg\max_{c \in \{0,\dots,C-1\}} z_c(x)$$
 
-By contrast, **purely differential-geometric losses** never inspect individual output coordinates $z_a(x)$ and do **not** require $C$ output neurons (a 2D output surface $\Phi^{(L)}_\theta : \mathbb{R}^2 \to \mathbb{R}^2$ suffices for any $C \ge 2$). Instead, each loss extracts a **single geometric scalar field** $\psi(x; \theta) \in \mathbb{R}$ from the final-layer pullback metric $g^{(L)}(x; \theta)$ and partitions the 1D geometric spectrum $\mathbb{R}$ into **$C$ ordered, margin-separated geometric regimes** (`_scalar_geometric_margin_loss_and_weights` and `scalar_geometric_predict` in `src/geometry.py`).
+By contrast, **purely differential-geometric losses** never inspect individual output coordinates $z_a(x)$ and do **not** require $C$ output neurons (a 2D output surface $\Phi^{(L)}_\theta : \mathbb{R}^2 \to \mathbb{R}^2$ suffices for any $C \ge 2$). Instead, each loss extracts a **single geometric scalar field** $\psi(x; \theta) \in \mathbb{R}$ from the final-layer pullback metric $g^{(L)}(x; \theta)$ and partitions the 1D geometric spectrum $\mathbb{R}$ into **$C$ ordered, margin-separated geometric regimes** (`_scalar_geometric_margin_loss_and_weights` and `scalar_geometric_predict` in `src/diffgeom/geometry.py`).
 
 Let $\tau > 0$ be the margin (`margin`), $\beta > 0$ the softplus sharpness (`beta_hinge = 4.0`), and $\sigma_\beta(u) = \frac{1}{\beta}\log(1 + e^{\beta u})$:
 
@@ -102,12 +102,19 @@ First-order metric invariants (**Volume-Element** $\sqrt{\det g}$ and **Metric A
 
 ```text
 diffgeom/
-├── README.md                                                 # Project summary, key results charts, and layout
+├── pyproject.toml                                            # PEP 621 package metadata, dependencies & CLI scripts (uv + hatchling)
+├── uv.lock                                                   # Locked deterministic dependency graph for uv
+├── .python-version                                           # Pinned Python interpreter version (3.13)
 ├── config.yaml                                               # Shared dataset, architecture & activation config read by all notebooks
+├── README.md                                                 # Project summary, key results charts, and layout
 ├── spec.md                                                   # Mathematical formulation, literature review & experiment plan
 ├── src/
-│   ├── __init__.py                                           # Package exports
-│   └── geometry.py                                           # Composable torch.func differential geometry operators & losses
+│   └── diffgeom/
+│       ├── __init__.py                                       # Package exports
+│       ├── geometry.py                                       # Composable torch.func differential geometry operators & losses
+│       └── cli.py                                            # `diffgeom-build-notebooks` CLI entrypoint
+├── tests/
+│   └── test_geometry.py                                      # Pytest unit test suite for datasets, metrics, losses & approximations
 ├── notebooks/
 │   ├── 01_baseline_and_pullback_metrics.ipynb                # Layerwise pullback metrics, volume elements & Tissot ellipses
 │   ├── 02_layerwise_curvature_evolution.ipynb                # Christoffel symbols, Riemann curvature & 2D-to-2D flatness analysis
@@ -127,15 +134,34 @@ diffgeom/
 
 ---
 
-## Notebook Configuration & Reproducibility
+## Environment Setup, Configuration & Reproducibility (`uv`)
 
+### 1. Install the Environment & Serve Jupyter Notebooks
+```bash
+# Create/sync .venv and install `diffgeom`, `jupyterlab`, and `notebook`
+uv sync
+
+# Register the `Python (diffgeom)` kernelspec inside .venv (or use `--user` for global Jupyter/IDE discovery)
+uv run python -m ipykernel install --sys-prefix --name diffgeom --display-name "Python (diffgeom)"
+
+# Start Jupyter Notebook (or `uv run jupyter lab`) serving the `diffgeom` kernel
+uv run jupyter notebook --notebook-dir notebooks
+
+# On a remote/SSH machine without a local browser, run headless and connect to the printed http://127.0.0.1:8888/?token=... URL:
+uv run jupyter notebook --no-browser --port 8888
+```
+
+### 2. Shared Experiment Configuration (`config.yaml`)
 All seven notebooks (`01` through `07`) read their experiment settings at startup from `config.yaml` at the project root:
 1. **Toy Synthetic Dataset (`dataset.name`, `dataset.n_classes: 2`, `dataset.params`)**: Choose among `"moons"`, `"circles"`, `"blobs"`, `"classification"`, and `"gaussian_quantiles"` from `scikit-learn` along with `noise`, `n_train`, `n_test`, `seed`, `n_classes` (default `2`), and generator-specific options (`factor`, `cluster_std`, `class_sep`, `cov`).
 2. **Layer Architecture (`model.layer_dims`)**: Any integer sequence `[input_dim, *hidden_dims, output_dim]` (default `[2, 5, 10, 15, 10, 2]`).
 3. **Hidden & Output Activations (`model.hidden_activation`, `model.output_activation`)**: Independently configurable hidden and output nonlinearities (`"tanh"`, `"gelu"`, `"silu"`, `"softplus"`, `"elu"`, `"sigmoid"`, `"sin"`, `"relu"`, `"identity"`, `"softmax"`, `"log_softmax"`).
 
-All notebooks are pre-executed with embedded outputs. To regenerate and execute all seven notebooks from scratch:
-
+### 3. Run Tests & Rebuild Notebooks
 ```bash
-/usr/local/google/home/raulramos/projects/lunarpoles/.venv/bin/python scripts/build_all_notebooks.py
+# Run unit tests
+uv run pytest
+
+# Rebuild & execute all 7 notebooks (or pass specific numbers, e.g. `uv run diffgeom-build-notebooks 6 7`)
+uv run diffgeom-build-notebooks
 ```

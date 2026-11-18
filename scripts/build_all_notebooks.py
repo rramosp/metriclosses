@@ -41,10 +41,10 @@ import yaml
 
 PROJECT_ROOT = Path.cwd()
 for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
-    if (p / "src" / "geometry.py").exists():
+    if (p / "config.yaml").exists():
         PROJECT_ROOT = p
-        if str(p) not in sys.path:
-            sys.path.insert(0, str(p))
+        if str(p / "src") not in sys.path:
+            sys.path.insert(0, str(p / "src"))
         break
 
 with open(PROJECT_ROOT / "config.yaml", "r") as f:
@@ -64,7 +64,7 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse
 
-from src.geometry import (
+from diffgeom.geometry import (
     MoonsMLP,
     get_synthetic_dataset,
     make_evaluation_grid,
@@ -368,10 +368,10 @@ import yaml
 
 PROJECT_ROOT = Path.cwd()
 for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
-    if (p / "src" / "geometry.py").exists():
+    if (p / "config.yaml").exists():
         PROJECT_ROOT = p
-        if str(p) not in sys.path:
-            sys.path.insert(0, str(p))
+        if str(p / "src") not in sys.path:
+            sys.path.insert(0, str(p / "src"))
         break
 
 with open(PROJECT_ROOT / "config.yaml", "r") as f:
@@ -390,7 +390,7 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
-from src.geometry import (
+from diffgeom.geometry import (
     MoonsMLP,
     get_synthetic_dataset,
     make_evaluation_grid,
@@ -827,10 +827,10 @@ import yaml
 
 PROJECT_ROOT = Path.cwd()
 for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
-    if (p / "src" / "geometry.py").exists():
+    if (p / "config.yaml").exists():
         PROJECT_ROOT = p
-        if str(p) not in sys.path:
-            sys.path.insert(0, str(p))
+        if str(p / "src") not in sys.path:
+            sys.path.insert(0, str(p / "src"))
         break
 
 with open(PROJECT_ROOT / "config.yaml", "r") as f:
@@ -849,7 +849,7 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
-from src.geometry import (
+from diffgeom.geometry import (
     MoonsMLP,
     get_synthetic_dataset,
     make_evaluation_grid,
@@ -1198,10 +1198,10 @@ import yaml
 
 PROJECT_ROOT = Path.cwd()
 for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
-    if (p / "src" / "geometry.py").exists():
+    if (p / "config.yaml").exists():
         PROJECT_ROOT = p
-        if str(p) not in sys.path:
-            sys.path.insert(0, str(p))
+        if str(p / "src") not in sys.path:
+            sys.path.insert(0, str(p / "src"))
         break
 
 with open(PROJECT_ROOT / "config.yaml", "r") as f:
@@ -1219,7 +1219,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-from src.geometry import (
+from diffgeom.geometry import (
     MoonsMLP,
     get_synthetic_dataset,
     make_evaluation_grid,
@@ -1488,10 +1488,10 @@ import yaml
 
 PROJECT_ROOT = Path.cwd()
 for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
-    if (p / "src" / "geometry.py").exists():
+    if (p / "config.yaml").exists():
         PROJECT_ROOT = p
-        if str(p) not in sys.path:
-            sys.path.insert(0, str(p))
+        if str(p / "src") not in sys.path:
+            sys.path.insert(0, str(p / "src"))
         break
 
 with open(PROJECT_ROOT / "config.yaml", "r") as f:
@@ -1510,7 +1510,7 @@ import torch.nn as nn
 from torch.func import functional_call, jacrev, vmap
 import matplotlib.pyplot as plt
 
-from src.geometry import (
+from diffgeom.geometry import (
     MoonsMLP,
     get_synthetic_dataset,
     make_evaluation_grid,
@@ -2163,10 +2163,10 @@ import yaml
 
 PROJECT_ROOT = Path.cwd()
 for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
-    if (p / "src" / "geometry.py").exists():
+    if (p / "config.yaml").exists():
         PROJECT_ROOT = p
-        if str(p) not in sys.path:
-            sys.path.insert(0, str(p))
+        if str(p / "src") not in sys.path:
+            sys.path.insert(0, str(p / "src"))
         break
 
 with open(PROJECT_ROOT / "config.yaml", "r") as f:
@@ -2187,7 +2187,7 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 
-from src.geometry import (
+from diffgeom.geometry import (
     MoonsMLP,
     get_synthetic_dataset,
     make_evaluation_grid,
@@ -2906,10 +2906,10 @@ import yaml
 
 PROJECT_ROOT = Path.cwd()
 for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
-    if (p / "src" / "geometry.py").exists():
+    if (p / "config.yaml").exists():
         PROJECT_ROOT = p
-        if str(p) not in sys.path:
-            sys.path.insert(0, str(p))
+        if str(p / "src") not in sys.path:
+            sys.path.insert(0, str(p / "src"))
         break
 
 with open(PROJECT_ROOT / "config.yaml", "r") as f:
@@ -2930,7 +2930,7 @@ from torch.profiler import ProfilerActivity, profile
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 
-from src.geometry import (
+from diffgeom.geometry import (
     MoonsMLP,
     get_synthetic_dataset,
     make_evaluation_grid,

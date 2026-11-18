@@ -9,9 +9,12 @@ loss functions) using composable PyTorch automatic differentiation (torch.func).
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
+from collections.abc import Callable, Sequence
+from typing import Any, Literal
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 from sklearn.datasets import (
     make_blobs,
     make_circles,
@@ -20,9 +23,7 @@ from sklearn.datasets import (
     make_moons,
 )
 from sklearn.model_selection import train_test_split
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from torch import nn
 from torch.func import functional_call, jacfwd, jacrev, vmap
 
 MetricMode = Literal["euclidean", "graph", "conformal_gaussian"]
@@ -40,7 +41,7 @@ def get_synthetic_dataset(
     dtype: torch.dtype = torch.float64,
     device: str | torch.device = "cpu",
     **dataset_kwargs: Any,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Generate standardized train/test splits from scikit-learn synthetic classification datasets.
 
     Supported dataset_name values:
@@ -55,8 +56,7 @@ def get_synthetic_dataset(
 
     n_total = n_train + n_test
     key = dataset_name.lower().strip()
-    if key.startswith("make_"):
-        key = key[len("make_") :]
+    key = key.removeprefix("make_")
 
     rng = np.random.RandomState(seed)
 
@@ -65,7 +65,7 @@ def get_synthetic_dataset(
             X, y = make_moons(n_samples=n_total, noise=noise, random_state=seed)
         else:
             # Generalized multi-class crescents using make_moons building blocks
-            per_pair = int(math.ceil(n_total / n_classes))
+            per_pair = math.ceil(n_total / n_classes)
             xs, ys = [], []
             for c in range(n_classes):
                 x_pair, y_pair = make_moons(n_samples=2 * per_pair, noise=noise, random_state=seed + c)
@@ -175,7 +175,7 @@ def get_moons_dataset(
     seed: int = 42,
     dtype: torch.dtype = torch.float64,
     device: str | torch.device = "cpu",
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Generate standardized make_moons train and test datasets."""
     return get_synthetic_dataset(
         dataset_name="moons",
@@ -193,7 +193,7 @@ def make_evaluation_grid(
     X: torch.Tensor,
     n_grid: int = 35,
     padding: float = 0.45,
-) -> Tuple[np.ndarray, np.ndarray, torch.Tensor]:
+) -> tuple[np.ndarray, np.ndarray, torch.Tensor]:
     """Create a 2D meshgrid covering the input domain of X."""
     x_np = X.detach().cpu().numpy()
     x1_min, x1_max = x_np[:, 0].min() - padding, x_np[:, 0].max() + padding
@@ -214,7 +214,7 @@ class MoonsMLP(nn.Module):
         self,
         layer_dims: Sequence[int] = (2, 5, 10, 15, 10, 2),
         activation: str = "tanh",
-        output_activation: Optional[str] = "identity",
+        output_activation: str | None = "identity",
         beta: float = 3.0,
         seed: int = 42,
         dtype: torch.dtype = torch.float64,
@@ -286,7 +286,7 @@ class MoonsMLP(nn.Module):
                 h = self._activate_output(h)
         return h
 
-    def forward_all_layers(self, x: torch.Tensor) -> List[torch.Tensor]:
+    def forward_all_layers(self, x: torch.Tensor) -> list[torch.Tensor]:
         """Return representations [x, h^(1), ..., z^(L)]."""
         reps = [x]
         h = x
@@ -306,7 +306,7 @@ class MoonsMLP(nn.Module):
 def _make_single_point_layer_fn(
     model: MoonsMLP,
     layer_idx: int,
-    params: Optional[Dict[str, torch.Tensor]] = None,
+    params: dict[str, torch.Tensor] | None = None,
 ) -> Callable[[torch.Tensor], torch.Tensor]:
     """Return a function phi(x_single) -> h_single for a single input point x_single."""
     if params is None:
@@ -360,7 +360,7 @@ def compute_layer_jacobian(
     model: MoonsMLP,
     X: torch.Tensor,
     layer_idx: int,
-    params: Optional[Dict[str, torch.Tensor]] = None,
+    params: dict[str, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Compute layerwise Jacobian J^(l)(x) of shape (N, d_l, 2)."""
     phi_single = _make_single_point_layer_fn(model, layer_idx, params=params)
@@ -374,7 +374,7 @@ def compute_layer_pullback_metric(
     metric_mode: MetricMode = "euclidean",
     eps: float = 1e-6,
     sigma: float = 2.0,
-    params: Optional[Dict[str, torch.Tensor]] = None,
+    params: dict[str, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Compute pullback metric tensor g^(l)_{ij}(x) of shape (N, 2, 2)."""
     phi_single = _make_single_point_layer_fn(model, layer_idx, params=params)
@@ -390,7 +390,7 @@ def compute_volume_element(g: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
 
 def compute_metric_spectrum(
     g: torch.Tensor, eps: float = 1e-12
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return eigenvalues (N, 2), eigenvectors (N, 2, 2), and condition number lambda_max/lambda_min."""
     evals, evecs = torch.linalg.eigh(g)
     evals = torch.clamp(evals, min=eps)
@@ -404,14 +404,14 @@ def compute_metric_spectrum(
 def _christoffel_and_curvature_from_g_single(
     g_single: Callable[[torch.Tensor], torch.Tensor],
     eps: float = 1e-8,
-) -> Callable[[torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Return function computing (g, Gamma^k_{ij}, R_{1212}, K) at a single 2D point x."""
     dg_fn = jacrev(g_single)  # d g_{ij} / d x^k -> shape (2, 2, 2) indexed as [i, j, k]
     ddg_fn = jacrev(dg_fn)  # d^2 g_{ij} / (d x^k d x^l) -> shape (2, 2, 2, 2) indexed as [i, j, k, l]
 
     def geom_single(
         x_single: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         g = g_single(x_single)  # (2, 2)
         dg = dg_fn(x_single)  # dg[i, j, k] = \partial_k g_{ij}
         ddg = ddg_fn(x_single)  # ddg[i, j, k, l] = \partial_l \partial_k g_{ij}
@@ -470,7 +470,7 @@ def compute_christoffel_symbols(
     metric_mode: MetricMode = "euclidean",
     eps: float = 1e-6,
     sigma: float = 2.0,
-    params: Optional[Dict[str, torch.Tensor]] = None,
+    params: dict[str, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Compute Christoffel symbols Gamma^(l)k_{ij}(x) of shape (N, 2, 2, 2)."""
     phi_single = _make_single_point_layer_fn(model, layer_idx, params=params)
@@ -487,7 +487,7 @@ def compute_gaussian_curvature(
     metric_mode: MetricMode = "euclidean",
     eps: float = 1e-6,
     sigma: float = 2.0,
-    params: Optional[Dict[str, torch.Tensor]] = None,
+    params: dict[str, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Compute Gaussian curvature K^(l)(x) of shape (N,)."""
     phi_single = _make_single_point_layer_fn(model, layer_idx, params=params)
@@ -504,8 +504,8 @@ def compute_layer_geometry(
     metric_mode: MetricMode = "euclidean",
     eps: float = 1e-6,
     sigma: float = 2.0,
-    params: Optional[Dict[str, torch.Tensor]] = None,
-) -> Dict[str, torch.Tensor]:
+    params: dict[str, torch.Tensor] | None = None,
+) -> dict[str, torch.Tensor]:
     """Compute metric tensor g, volume element, Christoffel symbols, R_1212, and Gaussian curvature K."""
     phi_single = _make_single_point_layer_fn(model, layer_idx, params=params)
     g_single = _metric_single_from_phi(phi_single, metric_mode=metric_mode, eps=eps, sigma=sigma)
@@ -522,7 +522,7 @@ def compute_layer_geometry(
     }
 
 
-def flatten_params(param_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+def flatten_params(param_dict: dict[str, torch.Tensor]) -> torch.Tensor:
     """Flatten a dictionary of parameter tensors into a single 1D vector in R^P."""
     return torch.cat([p.reshape(-1) for p in param_dict.values()], dim=0)
 
@@ -531,7 +531,7 @@ def compute_parameter_fim(
     model: MoonsMLP,
     X: torch.Tensor,
     damping: float = 1e-6,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute the P x P Parameter Fisher Information Matrix F(theta) and per-sample score vectors.
 
     F_{mu,nu}(theta) = E_x [ sum_{c=0}^{C-1} p(y=c|x; theta) d_mu log p(y=c|x) d_nu log p(y=c|x) ]
@@ -540,7 +540,7 @@ def compute_parameter_fim(
     buffers = dict(model.named_buffers())
     param_keys = list(params.keys())
 
-    def log_probs_single(p_dict: Dict[str, torch.Tensor], x_single: torch.Tensor) -> torch.Tensor:
+    def log_probs_single(p_dict: dict[str, torch.Tensor], x_single: torch.Tensor) -> torch.Tensor:
         logits = functional_call(model, (p_dict, buffers), (x_single.unsqueeze(0),)).squeeze(0)
         return F.log_softmax(logits, dim=-1)
 
@@ -614,8 +614,8 @@ def _scalar_geometric_margin_loss_and_weights(
     y: torch.Tensor,
     margin: float,
     beta_hinge: float,
-    n_classes: Optional[int] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    n_classes: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute scalar geometric margin loss, predicted labels, and GGN residual weights."""
     inferred_c = int(y.max().item()) + 1 if y.numel() > 0 else 2
     c_total = max(2, inferred_c if n_classes is None else max(n_classes, inferred_c))
@@ -664,8 +664,8 @@ def curvature_margin_loss(
     lambda_vol: float = 0.05,
     lambda_iso: float = 0.01,
     k_clip: float = 15.0,
-    n_classes: Optional[int] = None,
-) -> Tuple[torch.Tensor, Dict[str, float]]:
+    n_classes: int | None = None,
+) -> tuple[torch.Tensor, dict[str, float]]:
     """Purely geometric loss separating classes by intrinsic Gaussian curvature K(x).
 
     Includes Riemannian volume stabilization (log det g)^2 and metric scale stabilization
@@ -708,8 +708,8 @@ def volume_contrastive_loss(
     margin: float = 0.6,
     beta_hinge: float = 4.0,
     lambda_iso: float = 0.02,
-    n_classes: Optional[int] = None,
-) -> Tuple[torch.Tensor, Dict[str, float]]:
+    n_classes: int | None = None,
+) -> tuple[torch.Tensor, dict[str, float]]:
     """Purely geometric loss separating classes by Riemannian log-volume element log(sqrt(det g))."""
     log_vol = 0.5 * torch.log(torch.clamp(torch.linalg.det(g), min=1e-8))
     loss_vol_sep, preds, _ = _scalar_geometric_margin_loss_and_weights(
@@ -735,8 +735,8 @@ def anisotropy_margin_loss(
     margin: float = 0.6,
     beta_hinge: float = 4.0,
     lambda_vol: float = 0.05,
-    n_classes: Optional[int] = None,
-) -> Tuple[torch.Tensor, Dict[str, float]]:
+    n_classes: int | None = None,
+) -> tuple[torch.Tensor, dict[str, float]]:
     """Purely geometric loss separating classes by directional metric polarization log(g_11 / g_22)."""
     log_ratio = torch.log(torch.clamp(g[:, 0, 0], min=1e-8) / torch.clamp(g[:, 1, 1], min=1e-8))
     loss_aniso, preds, _ = _scalar_geometric_margin_loss_and_weights(
@@ -767,10 +767,10 @@ def _sym2_inv_sqrt(g: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
 def compute_fast_graph_geometry(
     model: MoonsMLP,
     X: torch.Tensor,
-    layer_idx: Optional[int] = None,
-    params: Optional[Dict[str, torch.Tensor]] = None,
+    layer_idx: int | None = None,
+    params: dict[str, torch.Tensor] | None = None,
     eps: float = 1e-8,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute exact graph pullback metric g = I_2 + J^T J and Gaussian curvature K via Gauss's equation.
 
     Uses 2nd-order forward-mode spatial derivatives jacfwd(jacfwd(phi)) rather than 3rd-order
@@ -783,7 +783,7 @@ def compute_fast_graph_geometry(
     jac_fn = jacfwd(phi_single)
     hess_fn = jacfwd(jac_fn)
 
-    def single_geom(x_single: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def single_geom(x_single: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         J = jac_fn(x_single)  # (d_l, 2)
         H = hess_fn(x_single)  # (d_l, 2, 2)
         eye2 = torch.eye(2, dtype=x_single.dtype, device=x_single.device)
@@ -825,7 +825,7 @@ def compute_uncoupled_coord_metric(
     param_keys = list(params.keys())
     N = X.shape[0]
 
-    def z_flat(p_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def z_flat(p_dict: dict[str, torch.Tensor]) -> torch.Tensor:
         return functional_call(model, (p_dict, buffers), (X,)).reshape(-1)
 
     J_dict = jacfwd(z_flat)(params)
@@ -864,7 +864,7 @@ def compute_coupled_dewitt_metric(
         else:
             w_vol = torch.ones(N, dtype=X.dtype, device=X.device)
 
-    def whitened_metric_flat(p_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def whitened_metric_flat(p_dict: dict[str, torch.Tensor]) -> torch.Tensor:
         g = compute_layer_pullback_metric(
             model, X, layer_idx=model.num_layers, metric_mode=metric_mode, eps=eps, params=p_dict
         )
@@ -887,10 +887,10 @@ def compute_coupled_geometric_metric(
     dewitt_weight: float = 0.20,
     inv_eps: float = 1e-3,
     k_clip: float = 10.0,
-    lambda_vol: Optional[float] = None,
+    lambda_vol: float | None = None,
     lambda_iso: float = 0.005,
     damping: float = 2e-2,
-    n_classes: Optional[int] = None,
+    n_classes: int | None = None,
 ) -> torch.Tensor:
     """Compute the task-coupled P x P parameter metric induced by data-space geometry and target invariant.
 
@@ -905,8 +905,8 @@ def compute_coupled_geometric_metric(
         lambda_vol = {"curvature": 0.02, "volume": 0.02, "anisotropy": 0.05}[task]
 
     def eval_geom_components(
-        p_dict: Dict[str, torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        p_dict: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if task == "curvature":
             g, K = compute_fast_graph_geometry(model, X, params=p_dict)
             psi = k_clip * torch.tanh(K / k_clip)
@@ -940,7 +940,7 @@ def compute_coupled_geometric_metric(
         g0_inv_sqrt = _sym2_inv_sqrt(g0, eps=inv_eps)
         w_dw = math.sqrt(dewitt_weight)
 
-    def coupled_feature_vector(p_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def coupled_feature_vector(p_dict: dict[str, torch.Tensor]) -> torch.Tensor:
         psi, g, extra_reg = eval_geom_components(p_dict)
         f_psi = (psi * w_psi).unsqueeze(-1)
         M = torch.einsum("nij,njk,nkl->nil", g0_inv_sqrt, g, g0_inv_sqrt) * w_dw
@@ -960,7 +960,7 @@ def compute_coupled_geometric_metric(
 def _eval_model_batch(
     model: MoonsMLP,
     X_batch: torch.Tensor,
-    params: Optional[Dict[str, torch.Tensor]] = None,
+    params: dict[str, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     if params is None:
         return model(X_batch)
@@ -974,7 +974,7 @@ def compute_fd_pullback_metric(
     h: float = 1e-3,
     metric_mode: MetricMode = "euclidean",
     eps: float = 1e-6,
-    params: Optional[Dict[str, torch.Tensor]] = None,
+    params: dict[str, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Compute d_0 x d_0 pullback metric via a single batched forward-difference pass ((d_0 + 1)*N).
 
@@ -1003,8 +1003,8 @@ def _plane_7pt_curvature(
     v2: torch.Tensor,
     h: float = 2e-3,
     eps: float = 1e-8,
-    params: Optional[Dict[str, torch.Tensor]] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    params: dict[str, torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Evaluate 2D graph metric and Gaussian curvature on a 2-plane spanned by orthonormal (v1, v2) via 7-pt FD."""
     N = X.shape[0]
     s1 = h * v1
@@ -1061,8 +1061,8 @@ def compute_fd_graph_curvature(
     X: torch.Tensor,
     h: float = 2e-3,
     eps: float = 1e-8,
-    params: Optional[Dict[str, torch.Tensor]] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    params: dict[str, torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute 2D graph metric and Gaussian curvature K via a 7-point central stencil (pure 1st-order autodiff)."""
     if X.shape[1] != 2:
         raise ValueError(f"Coordinate 7-pt curvature stencil expects 2D inputs, got d_0={X.shape[1]}")
@@ -1076,7 +1076,7 @@ def build_knn_jet_operator(
     k_neighbors: int = 14,
     order: Literal[1, 2] = 2,
     ridge: float = 1e-4,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Precompute Gaussian-weighted local Taylor least-squares operators on a point cloud X (once at t = 0).
 
     - order = 1: returns (knn_idx, lin_op) of shape ((N, k), (N, d_0, k)) for 1st-order Jacobians.
@@ -1117,8 +1117,8 @@ def compute_knn_jet_geometry(
     jet_op: torch.Tensor,
     metric_mode: MetricMode = "graph",
     eps: float = 1e-6,
-    params: Optional[Dict[str, torch.Tensor]] = None,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    params: dict[str, torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Compute pullback metric g (and Gaussian curvature K if jet_op is order 2) from a SINGLE 1N forward pass."""
     Z = _eval_model_batch(model, X, params=params)  # (N, d_out) - exact 1N batch size!
     dZ = Z[knn_idx] - Z[:, None, :]  # (N, k, d_out)
@@ -1171,9 +1171,9 @@ def compute_sketched_pullback_metric(
     h: float = 1e-3,
     metric_mode: MetricMode = "euclidean",
     eps: float = 1e-6,
-    generator: Optional[torch.Generator] = None,
-    params: Optional[Dict[str, torch.Tensor]] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    generator: torch.Generator | None = None,
+    params: dict[str, torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Estimate pullback metric via m random orthonormal directional probes ((m + 1)*N forward evaluations).
 
     Returns (g_ambient_est, g_subspace), keeping compute O(m) independent of ambient input dimension d_0.
@@ -1198,9 +1198,9 @@ def compute_sketched_plane_curvature(
     X: torch.Tensor,
     h: float = 2e-3,
     eps: float = 1e-8,
-    generator: Optional[torch.Generator] = None,
-    params: Optional[Dict[str, torch.Tensor]] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    generator: torch.Generator | None = None,
+    params: dict[str, torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Estimate 2-plane sectional/Gaussian curvature along a random orthonormal 2-frame in R^{d_0} (7N evals, O(1) in d_0)."""
     d0 = X.shape[1]
     raw = torch.randn(d0, 2, generator=generator, dtype=X.dtype, device=X.device)
@@ -1218,8 +1218,8 @@ def woodbury_coupled_ngd_direction(
     beta_hinge: float = 4.0,
     dewitt_weight: float = 0.20,
     damping: float = 3e-2,
-    n_classes: Optional[int] = None,
-) -> Tuple[torch.Tensor, float]:
+    n_classes: int | None = None,
+) -> tuple[torch.Tensor, float]:
     """Matrix-free O(R^2 P) Woodbury Natural Gradient direction using 1st-order FD stencils on a subsample X_sub.
 
     Avoids ever allocating a P x P parameter metric matrix by solving an R x R system (R << P) via:
@@ -1230,7 +1230,7 @@ def woodbury_coupled_ngd_direction(
     param_keys = list(params.keys())
     S = X_sub.shape[0]
 
-    def fd_sub_terms(p_dict: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def fd_sub_terms(p_dict: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         if task == "curvature":
             g, K = compute_fd_graph_curvature(model, X_sub, params=p_dict)
             psi = 10.0 * torch.tanh(K / 10.0)
@@ -1253,7 +1253,7 @@ def woodbury_coupled_ngd_direction(
         g0_inv_sqrt = _sym2_inv_sqrt(g0, eps=1e-3)
         w_dw = math.sqrt(dewitt_weight)
 
-    def sketch_features(p_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def sketch_features(p_dict: dict[str, torch.Tensor]) -> torch.Tensor:
         psi, g = fd_sub_terms(p_dict)
         f_psi = (psi * w_psi).unsqueeze(-1)  # (S, 1)
         M = torch.einsum("nij,njk,nkl->nil", g0_inv_sqrt, g, g0_inv_sqrt) * w_dw
