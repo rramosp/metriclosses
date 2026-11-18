@@ -593,3 +593,83 @@ also, update the sys.path updating in all notebooks in the same way as it is in 
    OUTPUT_ACTIVATION = CFG["model"].get("output_activation", "identity")
    ```
    All seven notebooks were rebuilt and executed end-to-end, and [README.md](README.md) was updated to document [config.yaml](config.yaml).
+
+
+---
+
+## Turn 15
+
+### User
+in notebook 7, in figure in section "5. High Dimensional Input Scaling..." why are the y-axis referring to SGD (like ms/SGD step or MB?SGD step) ? ... since the graphs include SGD, but also the other methods with geometric losses
+
+### Assistant
+In Sections 2–5 of [notebooks/07-evaluating-efficient-training.ipynb](notebooks/07-evaluating-efficient-training.ipynb), **all five curves use `torch.optim.SGD` as the parameter optimizer**—the difference between the curves is only the **loss function** (`Cross-Entropy` vs. the exact/approximated geometric losses), not the optimizer.
+
+Specifically, every curve in Section 5 calls the same `benchmark_sgd_step(loss_fn, mlp_hd)` helper:
+```python
+sgd = torch.optim.SGD(model.parameters(), lr=1e-4)
+...
+sgd.zero_grad()
+l_run = loss_fn()   # Cross-Entropy OR Exact Autodiff OR FD Stencil OR Tangent Sketch
+l_run.backward()
+sgd.step()          # Same first-order SGD weight update for every curve
+```
+
+### Why it was set up that way (and why the label looks ambiguous)
+1. **Controlled benchmark**: Holding the optimizer fixed to vanilla `SGD` across all five methods ensures zero confounding overhead from Adam moment buffers or $P \times P$ Natural Gradient solves (which are benchmarked separately in Section 6), isolating the compute and memory cost of `loss_fn()` + `loss.backward()` as $d_0$ grows from `2` to `128`.
+2. **Naming ambiguity**: Because the baseline legend entry is labeled `"SGD + Cross-Entropy"` while the geometric curves omit `"SGD +"` (e.g., `"Exact Metric Autodiff (2nd)"`, `"App 1: Full Coord FD"`), writing `ms / SGD step` and `MB / SGD step` on the y-axes makes `"SGD"` look like it refers to the baseline curve rather than to one `zero_grad() + forward + backward + sgd.step()` iteration shared by all methods.
+
+If you'd like, I can update those axis labels (in Sections 2 and 5 of [notebooks/07-evaluating-efficient-training.ipynb](notebooks/07-evaluating-efficient-training.ipynb)) to `"Step Latency (ms / training step)"` and `"Step Memory (MB / training step)"` so the distinction between the optimizer (`SGD`) and the loss (`Cross-Entropy` vs. geometric) is unambiguous.
+
+
+---
+
+## Turn 16
+
+### User
+ok, great. please add this explanation at the top of section 5 in the notebook
+
+### Assistant
+Added the explanation directly to the Section 5 introductory Markdown cell in [notebooks/07-evaluating-efficient-training.ipynb](notebooks/07-evaluating-efficient-training.ipynb) (and kept [scripts/build_all_notebooks.py](scripts/build_all_notebooks.py) synchronized), clarifying why `benchmark_sgd_step` uses `torch.optim.SGD` across all five loss curves so the `ms / SGD step` and `MB / SGD step` axes isolate pure forward + backward operator cost without optimizer state/matrix-solve overhead.
+
+
+---
+
+## Turn 17
+
+### User
+in notebook 7 add an explanation at the beginning of each section explaining in detail what experiment is doing and how to interpret the tables and results
+
+### Assistant
+Added detailed `What This Experiment Does` and `How to Interpret the Table & Plots` subsections at the start of **every section (`Sections 1–6`)** in [notebooks/07-evaluating-efficient-training.ipynb](notebooks/07-evaluating-efficient-training.ipynb) (and synchronized [scripts/build_all_notebooks.py](scripts/build_all_notebooks.py)):
+
+1. **Section 1 (`Setup, Offline Jet Precomputation & Numerical Approximation Fidelity`)**: Explains the offline $k$-NN Taylor jet precomputation, the 100-epoch reference MLP manifold setup, how to read the machine-precision Gauss identity check vs. FD/jet error diagnostics, the truncation-vs.-roundoff V-curve over $h \in [10^{-6}, 10^{-1}]$, and the pointwise $\mathrm{arcsinh}(K)$ identity scatter plot.
+2. **Section 2 (`Step-Level Compute, Memory & Autograd Graph Benchmark`)**: Explains the 14-configuration `benchmark_sgd_step` suite across `Baseline`, `Volume`, `Anisotropy`, and `Curvature`, every table column (`Order`, `Evals`, `Latency`, `Speedup`, `Memory`, `Mem Save`, `Nodes`), and the three-panel figure (horizontal compute/memory log-bar charts + Compute–Memory Pareto scatter plot with marker shapes and node-scaled bubble sizes).
+3. **Section 3 (`End-to-End SGD Training Convergence & Exact Analytical Test Accuracy`)**: Explains the 120-epoch `SGD` training matrix, the strict **train-approximate / evaluate-exact** protocol (`exact_test_accuracy`), the runtime-ratio summary table (`vs SGD+CE Time`), and the difference between per-epoch statistical fidelity (top row) and log wall-clock compute efficiency (bottom row).
+4. **Section 4 (`Exact Analytical Decision Landscapes Learned via 1st-Order Approximations`)**: Explains the $2 \times 4$ dense ambient grid evaluation of exact $\log\sqrt{\det g^{(L)}(x)}$ and $\mathrm{arcsinh}(K^{(L)}(x))$, the diverging `RdBu_r` color scale (`< 0` blue vs. `> 0` red), and the solid black `0.0` geometric decision boundary contour.
+5. **Section 5 (`High-Dimensional Input Scaling, d_0 = 2 -> 128`)**: Explains the ambient input dimension sweep (`N = 128`), why `ms / SGD step` and `MB / SGD step` hold `torch.optim.SGD` fixed across all five objectives, how to read the `ms / MB` scaling table, and why `Approach 3` (`2N` metric probe and `7N` random 2-plane curvature) stays $O(1)$ in batch multiplicity while coordinate-wise methods grow steeply with $d_0$.
+6. **Section 6 (`Matrix-Free Woodbury Coupled Natural Gradient`)**: Explains how `woodbury_coupled_ngd_direction` combines 1st-order 7-point FD stencils on an $S = 16$ subsample ($R = 64$ coupled DeWitt + curvature features) with the Sherman–Morrison–Woodbury identity to avoid $P \times P$ matrix allocation/inversion, and how to interpret the step-cost summary rows and loss/accuracy trajectories against `Uncoupled SGD` and `Dense Coupled NGD`.
+
+
+---
+
+## Turn 18
+
+### User
+do the same for the rest of the notebooks
+
+### Assistant
+Added detailed **`What This Experiment Does`** and **`How to Interpret ...`** subsections at the beginning of every section across all six remaining notebooks (preserving all executed outputs and inline figures while keeping [scripts/build_all_notebooks.py](scripts/build_all_notebooks.py) synchronized):
+
+1. **[notebooks/01_baseline_and_pullback_metrics.ipynb](notebooks/01_baseline_and_pullback_metrics.ipynb) (`Sections 1–4`)**:
+   - Baseline Cross-Entropy training & checkpoint capture (`t = 0, 25, 80, 250`), $2 \times L$ layerwise volume magnification ($\log_{10}\sqrt{\det g^{(\ell)}}$) and spectral anisotropy ($\log_{10}(\lambda_1/\lambda_2)$) heatmaps + summary table, Tissot indicatrix ellipses illustrating singular foliation compression, and 4-epoch symmetry-breaking progression.
+2. **[notebooks/02_layerwise_curvature_evolution.ipynb](notebooks/02_layerwise_curvature_evolution.ipynb) (`Setup + Sections 1–5`)**:
+   - Closed-form sphere ($K = 0.25$) and hyperbolic saddle ($K(0) = -3.0$) analytical validation, empirical verification of the 2D-to-2D Euclidean flatness identity ($K \equiv 0$) vs. Graph/Conformal/Penultimate metrics, $1 \times L$ $\mathrm{arcsinh}(K^{(\ell)})$ depth maps, interior-vs.-boundary curvature & Levi-Civita connection $\|\Gamma^{(\ell)}\|_F$ evolution, layerwise log-volume density profiles, and coordinate vs. spectral anisotropy evolution.
+3. **[notebooks/03_parameter_data_manifold_duality.ipynb](notebooks/03_parameter_data_manifold_duality.ipynb) (`Setup + Sections 1–4`)**:
+   - Co-evolution of the $P \times P$ Parameter FIM spectrum, Effective Rank, and $2 \times 2$ Data Information Matrix trace, input singular foliation tangent `quiver` map (`DIM` kernel eigenvector $v_{\ker}$), Halverson–Ruehle metric/curvature flow sensitivity across stiff vs. null FIM modes, and Euclidean GD vs. Fisher Natural Gradient trajectories.
+4. **[notebooks/04_purely_geometric_curvature_losses.ipynb](notebooks/04_purely_geometric_curvature_losses.ipynb) (`Setup + Sections 1–3`)**:
+   - End-to-end 3rd-order autodiff curvature-margin training & class curvature bifurcation, 2D $\mathrm{arcsinh}(K^{(L)})$ zero-curvature decision boundary + held-out test curvature histogram, and 3D Monge surface $(x^1, x^2, z^1(x))$ colored by hyperbolic saddle ($K < 0$) vs. elliptic dome ($K > 0$) curvature.
+5. **[notebooks/05_geometric_loss_ablations_and_synthesis.ipynb](notebooks/05_geometric_loss_ablations_and_synthesis.ipynb) (`Setup + Sections 1–7`)**:
+   - Head-to-head training across Cross-Entropy, Curvature, Volume-Element, and Metric Anisotropy losses, $1 \times 4$ native decision landscapes, layerwise curvature gaps & $P \times P$ parameter metric back-reaction, layerwise log-volume and anisotropy gap tables/profiles, differential-order compute/memory/node benchmarks, and the $3 \times 4$ cross-evaluation selectivity matrix (`★ Target` diagonal vs. off-diagonal controls).
+6. **[notebooks/06-coupled-optimization.ipynb](notebooks/06-coupled-optimization.ipynb) (`Setup + Sections 1–5`)**:
+   - Machine-precision Gauss identity check & exact $E(2)$ output translation/rotation quotienting (`|v^T G v|` table and initial spectra), 45-step Coupled Geom-NGD vs. uncoupled optimizers (`GD`, `Adam`, `Coord-NGD`), $3 \times 4$ learned geometric landscapes, mechanistic diagnostics (spurious bias gauge drift & unclipped 3rd-order curvature gradient spikes), and the unsupervised `DeWitt-NGD` vs. `Task-Coupled Geom-NGD` ablation.

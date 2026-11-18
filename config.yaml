@@ -3,12 +3,12 @@
 dataset:
   # Scikit-learn synthetic dataset generator
   # Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
-  name: "moons"
+  name: "circles"
   n_classes: 2
   params:
     n_train: 240
     n_test: 120
-    noise: 0.10
+    noise: 0.2
     seed: 42
     # Optional generator-specific parameters:
     # factor: 0.5          # "circles": inner/outer circle scale factor

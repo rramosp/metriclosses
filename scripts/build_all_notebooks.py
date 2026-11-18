@@ -27,6 +27,9 @@ $$g^{(\ell)}_{ij}(x; \theta) = \left( (J^{(\ell)}(x))^T J^{(\ell)}(x) \right)_{i
 From $g^{(\ell)}(x; \theta)$ we extract two fundamental geometric diagnostics:
 1. **Riemannian Volume Magnification**: $\mathrm{d}V^{(\ell)}(x) = \sqrt{\det g^{(\ell)}(x; \theta)}$, measuring how local area elements expand or contract across layers (**Hauser & Ray, 2017**; **Zavatone-Veth et al., 2023**).
 2. **Metric Anisotropy (Condition Number)**: $\kappa(g^{(\ell)}(x)) = \lambda_{\max}(g^{(\ell)}) / \lambda_{\min}(g^{(\ell)})$ and **Tissot Indicatrices**, revealing how dimension-contracting layers compress directions tangent to equivalence classes while stretching directions orthogonal to the decision boundary (**Benfenati & Marta, 2023**).
+
+### Setup & Dataset Initialization
+The setup cell below loads `config.yaml`, promotes the output width via `CE_LAYER_DIMS = [*LAYER_DIMS[:-1], max(LAYER_DIMS[-1], N_CLASSES)]` when `N_CLASSES` exceeds `LAYER_DIMS[-1]`, generates the standardized synthetic train/test split, and constructs a uniform $32 \times 32$ evaluation grid (`grid_pts`) spanning the ambient 2D input domain.
 """,
         },
         {
@@ -93,7 +96,14 @@ print(
             "type": "markdown",
             "source": r"""
 ## 1. Baseline Cross-Entropy Training and Checkpoint Capture
-We train the configured MLP using standard Cross-Entropy loss and record parameter checkpoints across training epochs $t \in \{0, 25, 80, 250\}$.
+
+### What This Experiment Does
+We instantiate `MoonsMLP` with `CE_LAYER_DIMS`, train it for `250` epochs using `Adam` (`lr = 0.015`) and standard `CrossEntropyLoss`, and save deep-copied parameter snapshots at epochs $t \in \{0, 25, 80, 250\}$ so downstream sections can analyze both the converged representation manifold and its evolution from random initialization.
+
+### How to Interpret the Printed Diagnostics & Plots
+- **Printed Summary**: Reports exact layer widths, total trainable parameter count `P`, final Cross-Entropy loss, and train/held-out test accuracy at Epoch 250.
+- **Left Plot (`Baseline Training Convergence`)**: Shows Cross-Entropy loss decaying toward zero (blue) alongside held-out test accuracy climbing toward $1.0$ (green), verifying clean coordinate-based separation.
+- **Right Plot (`Learned Decision Regions`)**: Evaluates softmax probabilities across `grid_pts` (`P(y=1 | x)` for binary classification, or predicted class regions for $C > 2$). The **solid black contour** marks the learned decision boundary (`P = 0.5`), overlaid with held-out `X_test` samples.
 """,
         },
         {
@@ -172,7 +182,18 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 2. Layerwise Volume Magnification $\sqrt{\det g^{(\ell)}(x)}$ and Anisotropy $\lambda_1 / \lambda_2$
-We evaluate $g^{(\ell)}_{ij}(x)$ across all layers $\ell \in \{1, \dots, L\}$ on the 2D grid. Notice how the trained network concentrates high volume expansion ($\sqrt{\det g^{(\ell)}}$) and extreme directional stretching ($\lambda_1/\lambda_2$) along the nonlinear decision boundary, confirming **Zavatone-Veth et al. (2023)**.
+
+### What This Experiment Does
+At each layer $\ell \in \{1, \dots, L\}$ of the trained MLP, we compute the exact $2 \times 2$ Euclidean pullback metric $g^{(\ell)}(x) = (J^{(\ell)}(x))^T J^{(\ell)}(x) + \varepsilon I_2$ across the 2D grid via `torch.func.jacrev`, and extract:
+1. **Log Riemannian Volume Element**: $\log_{10}\sqrt{\det g^{(\ell)}(x)}$, measuring local 2D area expansion ($> 0$) vs. contraction ($< 0$).
+2. **Log Spectral Condition Number**: $\log_{10}(\lambda_1^{(\ell)}(x) / \lambda_2^{(\ell)}(x))$ where $\lambda_1 \ge \lambda_2 > 0$ are the eigenvalues of $g^{(\ell)}(x)$, quantifying directional stretching relative to orthogonal compression.
+
+### How to Interpret the $2 \times L$ Contour Grid & Summary Table
+- **Top Row (`magma` heatmaps, Volume Element)**: Bright yellow/orange ridges along the **dashed cyan decision boundary** indicate intense local area expansion where the network separates adjacent classes, whereas dark purple/black regions inside class basins indicate strong area contraction ($\det g^{(\ell)} \ll 1$), confirming **Zavatone-Veth et al. (2023)**.
+- **Bottom Row (`viridis` heatmaps, Metric Anisotropy)**: Bright yellow bands along the **dashed white decision boundary** show where $\lambda_1 \gg \lambda_2$—especially in later dimension-contracting layers ($d_{\ell-1} \to d_\ell$), where the representation collapses directions parallel to class manifolds while stretching the normal direction across the boundary.
+- **Summary Table (`Layer`, `Width`, `Median Vol`, `Max Vol`, `Median Cond (l1/l2)`)**:
+  - Compare `Median Vol` (typical interior point) against `Max Vol` (peak decision-boundary magnification) across depth.
+  - Watch `Median Cond (l1/l2)` grow from modest values in early expanding layers (`l = 1`) to orders of magnitude in the output projection (`l = L`), reflecting progressive rank-1 foliation collapse.
 """,
         },
         {
@@ -221,7 +242,14 @@ for row in summary_rows:
             "type": "markdown",
             "source": r"""
 ## 3. Tissot Indicatrices (Metric Tensor Ellipses) & Singular Foliation Compression
-To visualize the full $2 \times 2$ tensor field $g^{(\ell)}_{ij}(x)$ rather than just scalar invariants, we draw **Tissot ellipses** whose semi-axes align with the eigenvectors of $g^{(\ell)}(x)$ scaled by $\sqrt{\lambda_1}, \sqrt{\lambda_2}$. As predicted by **Benfenati & Marta (2023)**, deeper layers compress tangent vectors parallel to the decision boundary (forming 1D equivalence leaves) while strongly amplifying vectors orthogonal to the boundary.
+
+### What This Experiment Does
+Scalar invariants ($\det g$ and $\lambda_1/\lambda_2$) hide the **principal eigenvector directions** of the metric tensor. Here we evaluate $g^{(\ell)}(x)$ on an $11 \times 11$ coarse grid at three representative depths (first layer `1`, middle layer, and final layer `L`), diagonalize $g^{(\ell)}(x) = \sum_{i=1}^2 \lambda_i v_i v_i^T$, and render **Tissot indicatrix ellipses** with semi-axes proportional to $\sqrt{\lambda_1}, \sqrt{\lambda_2}$ oriented along $v_1, v_2$.
+
+### How to Interpret the Ellipse Maps
+- **Shape**: Nearly circular disks indicate locally isotropic/conformal representations ($\lambda_1 \approx \lambda_2$); elongated needles indicate strong rank-1 directional stretching ($\lambda_1 \gg \lambda_2$).
+- **Size**: Larger ellipses indicate stronger overall Jacobian sensitivity at $x$; tiny dots inside confident class interiors show local contraction where perturbations in $x$ barely move the layer representation.
+- **Orientation relative to the Dashed Black Boundary**: By Layer `L`, ellipses along the decision boundary collapse into thin needles oriented **orthogonal to the boundary**—visually confirming **Benfenati & Marta (2023)**: the network crushes tangent vectors parallel to constant-prediction equivalence leaves while amplifying perturbations that cross from one class into another.
 """,
         },
         {
@@ -264,7 +292,14 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 4. Symmetry Breaking Across Training Epochs
-We track the pullback volume field $\sqrt{\det g^{(\ell_{\text{penult}})}(x)}$ from random initialization ($t=0$) through convergence ($t=250$).
+
+### What This Experiment Does
+We reload the saved parameter checkpoints from Section 1 at epochs $t \in \{0, 25, 80, 250\}$ and evaluate the penultimate-layer log-volume field $\log_{10}\sqrt{\det g^{(L-1)}(x)}$ across `grid_pts` to observe *when* and *how* geometric structure emerges during optimization.
+
+### How to Interpret the Four-Epoch Progression
+- **`Epoch 0` (Random Initialization)**: Exhibits a smooth, broad, nearly uniform volume landscape determined solely by initial weight variance and activation slope, with zero alignment to the data geometry.
+- **`Epoch 25 -> Epoch 80` (Feature Formation)**: Translational/rotational homogeneity breaks rapidly as bright yellow high-volume ridges (`plasma` colormap) nucleate along the separating interface between classes.
+- **`Epoch 250` (Convergence)**: High-volume expansion sharpens into a localized tube tracking the nonlinear decision boundary, flanked by dark contractive basins over class interiors.
 """,
         },
         {
@@ -316,6 +351,12 @@ $$K^{(\ell)}(x) = \frac{R^{(\ell)}_{1212}(x)}{\det g^{(\ell)}(x)}, \qquad R_{\te
   1. **Graph Embedding Metric (Monge Patch in $\mathbb{R}^{2+d_L}$)**: $\tilde{g}^{(L)}_{ij}(x) = \delta_{ij} + ((J^{(L)}(x))^T J^{(L)}(x))_{ij}$.
   2. **Conformal Gaussian Output Metric**: $g^{(L)}_{\text{conf}}(x) = e^{-\|z(x)\|^2 / \sigma^2} (J^{(L)}(x))^T J^{(L)}(x)$.
   3. **Penultimate Surface Metric**: $g^{(L-1)}_{\text{eucl}}(x)$ on $\mathcal{M}_{L-1}$.
+
+### Setup & Closed-Form Analytical Curvature Validation
+Before evaluating neural manifolds, the setup cell below loads `config.yaml` and validates our exact `torch.func` Christoffel and Riemann curvature operator (`_christoffel_and_curvature_from_g_single`) against two textbook surfaces with known analytical Gaussian curvature:
+- **2-Sphere of radius $R = 2$ in stereographic coordinates**: Exact constant curvature $K = 1 / R^2 = 0.250000$.
+- **Hyperbolic paraboloid Monge patch $z(x^1, x^2) = (x^1)^2 - \frac{3}{4}(x^2)^2$ at the origin**: Exact saddle curvature $K(0) = \det \mathrm{Hess}(z)(0) = (2)(-1.5) = -3.000000$.
+Matching both values to 6+ decimal places confirms exact higher-order autodiff behavior.
 """,
         },
         {
@@ -387,7 +428,17 @@ print(f"Analytical Validation | Hyperbolic Saddle exact K(0)=-3.000000 -> autodi
             "type": "markdown",
             "source": r"""
 ## 1. Empirical Verification of 2D-to-2D Euclidean Flatness vs. Non-Degenerate Output Metrics
-We train our configured MLP and compare the four curvature definitions at the output and penultimate layers.
+
+### What This Experiment Does
+We train `MoonsMLP` for `200` `Adam` epochs with Cross-Entropy (saving weight checkpoints at $t \in \{0, 20, 70, 200\}$) and evaluate `compute_layer_geometry` on 50 held-out test points under **four Riemannian metric definitions**:
+1. **Layer `L` Euclidean Pullback (`metric_mode="euclidean"`)**: $g^{(L)} = (J^{(L)})^T J^{(L)} + \varepsilon I_2$.
+2. **Layer `L` Graph Immersion (`metric_mode="graph"`)**: $\tilde{g}^{(L)} = I_2 + (J^{(L)})^T J^{(L)}$, viewing $(x, z(x))$ as an immersed 2D surface in $\mathbb{R}^{2 + d_L}$.
+3. **Layer `L` Conformal Gaussian Metric (`metric_mode="conformal_gaussian"`)**: Multiplies $(J^{(L)})^T J^{(L)}$ by $e^{-\|z(x)\|^2/\sigma^2}$, endowing output space itself with non-flat ambient curvature.
+4. **Penultimate Layer `L-1` Euclidean Immersion**: Pullback of $I_{d_{L-1}}$ from the higher-dimensional hidden space $\mathbb{R}^{d_{L-1}}$.
+
+### How to Interpret the Printed Comparison
+- **Line 1 (`Layer L Euclidean Pullback`)**: Whenever $d_L = 2$, `max |K|` is zero up to floating-point/regularization noise ($\sim 10^{-11}$–$10^{-9}$) away from singular folds—confirming Gauss's *Theorema Egregium* (reparameterizing a flat 2D plane cannot create intrinsic curvature).
+- **Lines 2–4 (`Graph`, `Conformal`, and `Penultimate` metrics)**: Exhibit O(1) to O(100) `mean |K|` and wide negative-to-positive `[min, max]` ranges. This explains why **Graph Immersion (`I_2 + J^T J`)** is used throughout Notebooks 04–07 whenever intrinsic output curvature $K^{(L)}(x)$ is evaluated or optimized on $d_L \le 2$ layers.
 """,
         },
         {
@@ -429,7 +480,16 @@ print(f"  4. Layer {penult_idx} Penultimate Immersion (d={model.layer_dims[penul
             "type": "markdown",
             "source": r"""
 ## 2. Layerwise Gaussian Curvature Landscape $K^{(\ell)}(x)$ Across Network Depth
-We plot $\mathrm{arcsinh}(K^{(\ell)}(x))$ across all layers $\ell \in \{1, \dots, L\}$ (using Euclidean immersion whenever $d_\ell > 2$ and Graph immersion when $d_\ell \le 2$).
+
+### What This Experiment Does
+We evaluate the exact intrinsic Gaussian curvature $K^{(\ell)}(x) = R^{(\ell)}_{1212}(x) / \det g^{(\ell)}(x)$ across the 2D ambient grid for every layer $\ell \in \{1, \dots, L\}$ (using `euclidean` immersion when $d_\ell > 2$ and `graph` immersion when $d_\ell \le 2$). Because curvature spikes span several orders of magnitude near sharp folds, we plot $\mathrm{arcsinh}(K^{(\ell)}(x))$, which behaves linearly ($\approx K$) near $0$ and logarithmically ($\approx \pm \ln(2|K|)$) in the tails while preserving exact sign.
+
+### How to Interpret the $1 \times L$ Curvature Maps
+- **Diverging `RdBu_r` Colors**:
+  - **Blue ($K^{(\ell)} < 0$)**: Hyperbolic saddle geometry (principal curvatures of opposite sign).
+  - **White ($K^{(\ell)} \approx 0$)**: Locally flat / developable sheet (at least one vanishing principal curvature).
+  - **Red ($K^{(\ell)} > 0$)**: Elliptic dome or bowl geometry (principal curvatures of the same sign).
+- **Spatial Progression Across Depth**: Early wide layers show gentle, distributed positive and negative curvature bands, whereas deeper layers concentrate sharp alternating positive/negative curvature ridges directly along the **dashed black decision boundary** while flattening confident class interiors toward white ($K \approx 0$).
 """,
         },
         {
@@ -472,7 +532,15 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 3. Evolution of Layerwise Curvature & Christoffel Symbol Norms Across Training Epochs
-We track how the mean magnitude of Gaussian curvature $\mathbb{E}[|K^{(\ell)}(x)|]$ and Christoffel connection norm $\mathbb{E}[\|\Gamma^{(\ell)}(x)\|_F]$ evolve across layers $\ell \in \{1,\dots,L\}$ from initialization ($t=0$) to convergence ($t=200$), contrasting interior class points against decision-boundary points.
+
+### What This Experiment Does
+We partition `X_train` into **uncertain decision-boundary samples** (`max_c P(y=c|x) < 1/C + 0.20`) and **confident class-interior samples** (the complement), then reload checkpoints $t \in \{0, 20, 70, 200\}$ to track two layerwise profiles across training:
+1. **Mean Curvature Magnitude**: $\mathbb{E}[\mathrm{arcsinh}(|K^{(\ell)}(x)|)]$ separately on interior vs. boundary points.
+2. **Mean Levi-Civita Connection Strength**: $\mathbb{E}[\|\Gamma^{(\ell)k}_{ij}(x)\|_F]$, measuring coordinate-chart distortion and geodesic acceleration on $\mathcal{M}_\ell$.
+
+### How to Interpret the Two-Panel Evolution Plot
+- **Left Plot (`Curvature Evolution: Class Interior vs. Decision Boundary`)**: Compare solid lines (`Class Interior`) against dashed lines (`Boundary`) of the same color (epoch). At `Epoch 0` (gray), interior and boundary curvature are small and indistinguishable. By `Epoch 200` (green), boundary curvature (dashed) rises substantially above interior curvature (solid), showing that Cross-Entropy selectively bends the manifold along separating interfaces while smoothing class interiors (consistent with discrete Ricci-like interior smoothing).
+- **Right Plot (`Levi-Civita Connection Strength Across Layers`)**: Tracks $\|\Gamma^{(\ell)}\|_F$ from `Epoch 0` to `Epoch 200`. Rising connection norms in deeper layers quantify increasing nonlinear coordinate stretching as the network warps curved input classes into linearly separable output regions.
 """,
         },
         {
@@ -535,8 +603,17 @@ plt.show()
             "source": r"""
 ## 4. Layerwise Log Volume Landscape Across Network Depth
 
+### What This Experiment Does
 Alongside curvature $K^{(\ell)}(x)$, the pullback metric $g^{(\ell)}_{ij}(x; \theta)$ defines the **local Riemannian log-volume density**:
 $$\log \rho_{\text{vol}}^{(\ell)}(x; \theta) = \log\sqrt{\det g^{(\ell)}(x; \theta)} = \frac{1}{2}\log \det g^{(\ell)}(x; \theta)$$
+We map $\log\sqrt{\det g^{(\ell)}(x)}$ across `grid_pts` for every layer $\ell \in \{1, \dots, L\}$ and track its mean trajectory across training epochs $t \in \{0, 20, 70, 200\}$, comparing `Interior vs. Boundary` points as well as `Class C-1 vs. Class 0`.
+
+### How to Interpret the Table & Two Figures
+- **Summary Table (`Min log Vol`, `Mean log Vol`, `Max log Vol`, `Boundary Mean`)**: Negative entries indicate net local area contraction ($\det g < 1$); positive entries indicate area expansion ($\det g > 1$). Notice `Boundary Mean` consistently exceeds overall `Mean log Vol`, especially in deeper layers.
+- **Top $1 \times L$ Contour Row**: Blue ($< 0$) marks locally contractive basins, red ($> 0$) marks locally expansive ridges, the **dotted gold contour** marks the equiareal locus ($\det g^{(\ell)}(x) = 1$), and the **dashed black contour** marks the classifier boundary.
+- **Bottom Two-Panel Plot**:
+  - **Left (`Interior vs. Boundary`)**: Shows progressive divergence between boundary magnification (dashed squares) and interior compression (solid circles) over training epochs.
+  - **Right (`Class C-1 vs. Class 0`)**: Under standard Cross-Entropy training, solid (`Class C-1`) and dashed (`Class 0`) curves remain nearly superimposed across all layers—showing that Cross-Entropy treats classes symmetrically in volume and motivating Notebook 05's contrastive Volume-Element loss when class-specific volume separation is desired.
 """,
         },
         {
@@ -618,7 +695,17 @@ plt.show()
             "source": r"""
 ## 5. Layerwise Metric Anisotropy Landscape Across Network Depth
 
-To capture how each layer stretches space directionally (beyond isotropic area change), we examine **Directional Metric Polarization** $\log(g^{(\ell)}_{11} / g^{(\ell)}_{22})$ and **Spectral Anisotropy** $\log_{10}(\lambda_1 / \lambda_2)$ across layers $\ell \in \{1, \dots, L\}$.
+### What This Experiment Does
+To capture how each layer stretches space directionally beyond isotropic area change, we evaluate two complementary anisotropy diagnostics across layers $\ell \in \{1, \dots, L\}$ and epochs $t \in \{0, 20, 70, 200\}$:
+1. **Coordinate Directional Polarization**: $\log(g^{(\ell)}_{11}(x) / g^{(\ell)}_{22}(x))$ (under the graph metric), measuring horizontal ($x^1$) vs. vertical ($x^2$) stretching.
+2. **Rotation-Invariant Spectral Anisotropy**: $\log_{10}(\lambda_1^{(\ell)}(x) / \lambda_2^{(\ell)}(x))$ (under the Euclidean pullback metric), measuring the ratio of maximum-to-minimum directional stretching regardless of orientation.
+
+### How to Interpret the Table & Two Figures
+- **Summary Table (`Mean log(g11/g22)`, `Mean log10(l1/l2)`, `Boundary log10(l1/l2)`)**: Quantifies overall axis bias vs. principal eigenvalue conditioning across depth, with `Boundary log10(l1/l2)` peaking sharply at the output projection.
+- **Top $2 \times L$ Contour Grid**:
+  - **Row 0 (`PuOr_r` diverging)**: Positive orange/brown regions stretch $x^1$ more than $x^2$ (vertical boundary segments), whereas negative purple regions stretch $x^2$ more than $x^1$ (horizontal boundary segments).
+  - **Row 1 (`viridis`)**: Rotation-invariant spectral condition number $\log_{10}(\lambda_1/\lambda_2)$, forming a continuous high-anisotropy ridge along the entire **dashed white decision boundary**.
+- **Bottom Two-Panel Evolution Plot**: Left panel shows spectral anisotropy escalating with depth and epoch (highest along the boundary); Right panel shows that Cross-Entropy induces very small net class gap $\Delta \log(g_{11}/g_{22})$ between classes, contrasting with the dedicated Metric Anisotropy loss studied in Notebook 05.
 """,
         },
         {
@@ -726,6 +813,9 @@ We investigate the information-geometric interplay between:
    $$\mathrm{DIM}_{ij}(x; \theta) = \sum_{c=0}^{C-1} p_\theta(y=c|x) \frac{\partial \log p_\theta(y=c|x)}{\partial x^i} \frac{\partial \log p_\theta(y=c|x)}{\partial x^j}$$
 
 We further test **Halverson & Ruehle (2023)**'s *Metric Flow* framework by measuring how perturbations along the top vs. bottom eigenvectors of $F_{\mu\nu}(\theta)$ deform the layerwise metric tensor $g^{(\ell)}_{ij}(x; \theta)$ and Gaussian curvature $K^{(\ell)}(x; \theta)$, and compare **Euclidean Gradient Descent** against **Natural Gradient Descent** on $\Theta$.
+
+### Setup & Reference Trajectory Capture
+The setup cell below loads `config.yaml`, initializes the `MoonsMLP` (`P_total` trainable parameters), and trains it for `180` `Adam` epochs with Cross-Entropy while recording parameter snapshots at epochs $t \in \{0, 15, 60, 180\}$ so we can track the coupled information geometry of $\Theta$ and $\mathcal{M}_0$ across training.
 """,
         },
         {
@@ -809,7 +899,17 @@ print(
             "type": "markdown",
             "source": r"""
 ## 1. Co-Evolution of the $P \times P$ Parameter FIM Spectrum and $2 \times 2$ Data Information Matrix
-We compute the eigenspectrum of $F_{\mu\nu}(\theta)$ and the spatial trace of $\mathrm{DIM}_{ij}(x; \theta)$ across training checkpoints. Notice how the parameter manifold concentrates its Fisher information into a low-dimensional stiff subspace while $\mathrm{Tr}(\mathrm{DIM}(x; \theta))$ sharpens into a singular foliation along the decision boundary (**Tron et al., 2024**).
+
+### What This Experiment Does
+At each saved training checkpoint $t \in \{0, 15, 60, 180\}$, we compute:
+1. **The $P \times P$ Parameter Fisher Information Matrix (`compute_parameter_fim`)**: Diagonalized into sorted eigenvalues $\lambda_1 \ge \lambda_2 \ge \dots \ge \lambda_P$, along with its trace $\mathrm{Tr}(F(\theta)) = \sum_{k=1}^P \lambda_k$ and Shannon-entropy **Effective Rank** $r_{\text{eff}} = \exp\!\big(-\sum_k \hat{\lambda}_k \log \hat{\lambda}_k\big)$ where $\hat{\lambda}_k = \lambda_k / \mathrm{Tr}(F)$.
+2. **The $2 \times 2$ Data Information Matrix (`compute_data_information_matrix`)**: Evaluated across `X_train` to track average input Fisher sensitivity $\mathbb{E}_x[\mathrm{Tr}(\mathrm{DIM}(x; \theta))]$.
+
+### How to Interpret the Plots & Printed Diagnostics
+- **Left Plot (`Parameter Manifold Fisher Spectrum`, log–log)**: Reveals a classic **sloppy-model hierarchy**—a small number of top eigenvalues carry nearly all Fisher curvature, while the remaining spectrum decays by orders of magnitude into flat/redundant weight directions.
+- **Right Plot & Printed Table (`Tr(FIM)`, `E[Tr(DIM)]`, `FIM Effective Rank / P`)**:
+  - Compare `Parameter Tr(FIM)` (blue circles) and `Data E[Tr(DIM)]` (red squares) across epochs to observe dual sensitivity growth/consolidation between $\Theta$ and $\mathcal{M}_0$.
+  - `FIM Effective Rank` (green triangles, right axis) stays far smaller than total parameter dimension $P$, showing that classification geometry is controlled by a compact low-dimensional stiff subspace on $\Theta$ (**Tron et al., 2024**).
 """,
         },
         {
@@ -871,7 +971,13 @@ for ep, ft, dt, er in zip(ep_list, fim_traces, dim_traces, eff_ranks):
             "type": "markdown",
             "source": r"""
 ## 2. Singular Foliation of the Input Data Manifold via the Data Information Matrix (DIM)
-The kernel eigenvector $v_{\ker}(x)$ of the $2 \times 2$ Data Information Matrix spans the tangent distribution to the **1D foliation leaves** of constant class probability (**Benfenati & Marta, 2023**; **Tron et al., 2024**), while its principal eigenvector points along the maximum information gradient across the decision boundary.
+
+### What This Experiment Does
+We evaluate the $2 \times 2$ Data Information Matrix $\mathrm{DIM}_{ij}(x; \theta)$ across the 2D ambient grid (`grid_pts`), diagonalize $\mathrm{DIM}(x)$ at every grid point, plot $\log_{10}\mathrm{Tr}(\mathrm{DIM}(x))$ as a background heatmap, and overlay a `quiver` field of its **smallest-eigenvalue (kernel) eigenvector** $v_{\ker}(x)$.
+
+### How to Interpret the Heatmap & Quiver Field
+- **Background Heatmap (`inferno`, $\log_{10}\mathrm{Tr}(\mathrm{DIM}(x))$ )**: Bright yellow/orange bands pinpoint regions of high input Fisher information—strictly localized along the decision boundary where class probabilities transition sharply. Dark purple/black basins inside confident class interiors have $\mathrm{DIM}(x) \approx 0$ (local perturbations of $x$ barely alter $p_\theta(y \mid x)$).
+- **Cyan Quiver Vectors (`DIM Kernel / Foliation Tangent`)**: Because $\mathrm{DIM}(x)$ has rank at most $\min(d_0, C - 1)$ (rank `1` in binary 2D classification!), it possesses an exact null eigenvector $v_{\ker}(x)$ satisfying $D_x p_\theta(y \mid x)\, v_{\ker}(x) = 0$. Along the bright boundary ridge, the cyan arrows align **parallel to the decision boundary**, tracing out the 1D equivalence leaves of constant class probability (**Benfenati & Marta, 2023**; **Tron et al., 2024**).
 """,
         },
         {
@@ -903,7 +1009,15 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 3. Metric Flow Sensitivity: Perturbing $\Theta$ Along Top vs. Null FIM Eigenvectors
-To directly test how movements on the parameter manifold $\Theta$ induce metric and curvature flows on the output data manifold $\mathcal{M}_L$ (**Halverson & Ruehle, 2023**), we perturb $\theta \mapsto \theta + \delta \cdot v^{(k)}$ along unit eigenvectors $v^{(k)}$ of $F(\theta)$ and measure the induced change in the data pullback metric $\|\Delta g^{(L)}(x)\|_F$ and Gaussian curvature $|\Delta K^{(L)}(x)|$.
+
+### What This Experiment Does
+To directly test **Halverson & Ruehle (2023)**'s *Metric Flow* framework—how movements on the parameter manifold $\Theta$ deform the Riemannian geometry of the data representation manifold $\mathcal{M}_L$—we diagonalize $F(\theta)$ on the trained network, select logarithmically spaced eigenvector modes $k \in \{1, \dots, P\}$ from stiffest ($k = 1$) to flattest ($k = P$), perturb weights by equal Euclidean step length $\theta \mapsto \theta + \delta v^{(k)}$ ($\delta = 0.08$, $\|v^{(k)}\|_2 = 1$), and measure two induced deformations on `X_test`:
+1. **Data Metric Shift**: $\mathbb{E}_{x \in X_{\text{test}}}\!\left[\|g^{(L)}(x; \theta + \delta v^{(k)}) - g^{(L)}(x; \theta)\|_F\right]$.
+2. **Data Curvature Shift**: $\mathbb{E}_{x \in X_{\text{test}}}\!\left[|K^{(L)}(x; \theta + \delta v^{(k)}) - K^{(L)}(x; \theta)|\right]$.
+
+### How to Interpret the Log–Log Sensitivity Plot
+- Moving left-to-right from `k = 1` (stiffest Fisher mode) to `k = P` (flattest/null Fisher mode), both **Data Metric Shift** (blue circles) and **Data Curvature Shift** (red squares) fall by orders of magnitude—even though every perturbation vector has the **exact same Euclidean norm** $\delta = 0.08$ in $\mathbb{R}^P$!
+- This directly demonstrates parameter–data geometric duality: stiff directions of $F(\theta)$ drive macroscopic metric and curvature flows on $\mathcal{M}_L$, whereas null directions of $F(\theta)$ correspond to approximate symmetries/reparameterizations that leave data-manifold geometry nearly invariant.
 """,
         },
         {
@@ -958,7 +1072,16 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 4. Euclidean Gradient Descent vs. Riemannian Natural Gradient Descent on $\Theta$
-We compare standard Euclidean Gradient Descent ($\Delta \theta = -\eta \nabla_\theta \mathcal{L}$) with damped **Natural Gradient Descent** ($\Delta \theta = -\eta (F(\theta) + \lambda I)^{-1} \nabla_\theta \mathcal{L}$), tracking both classification loss and the smoothness of the induced Gaussian curvature $K^{(L)}(x)$ on the data manifold.
+
+### What This Experiment Does
+We train two identically initialized networks (`seed = 11`) for `45` full-batch Cross-Entropy steps:
+1. **Euclidean Gradient Descent**: $\Delta \theta = -\eta_{\text{GD}} \nabla_\theta \mathcal{L}$ (`lr = 0.15`), treating weight space as flat $\mathbb{R}^P$.
+2. **Riemannian Natural Gradient Descent**: $\Delta \theta = -\eta_{\text{NGD}} (F(\theta) + \lambda I)^{-1} \nabla_\theta \mathcal{L}$ (`lr = 0.08`, `damping = 0.02`), following steepest descent with respect to the Fisher metric on $\Theta$.
+Every 3 steps, we also evaluate the mean output Gaussian curvature magnitude $\mathbb{E}[|K^{(L)}(x)|]$ on held-out test samples.
+
+### How to Interpret the Two-Panel Trajectory Plot
+- **Left Plot (`Optimization Trajectory on Parameter Manifold`)**: Natural Gradient (green) achieves much steeper per-step Cross-Entropy loss reduction than Euclidean GD (blue) by amplifying progress along informative low-curvature directions while damping stiff directions.
+- **Right Plot (`Induced Curvature Flow on Data Manifold`)**: Shows the corresponding geometric evolution on $\mathcal{M}_L$—Natural Gradient rapidly and smoothly sculpts the output manifold's curvature profile as class separation locks in, whereas Euclidean GD lags behind.
 """,
         },
         {
@@ -1060,7 +1183,10 @@ We train our configured MLP from scratch by sculpting the intrinsic **Gaussian c
 $$\mathcal{L}_{\text{geom}}(\theta) = \frac{1}{N}\sum_{n=1}^N \mathrm{softplus}_\beta\!\Big(\tau - (2y_n - 1)\, K_{\text{clip}}(x_n; \theta)\Big) + \lambda_{\text{vol}} \frac{1}{N}\sum_{n=1}^N \Big(\log \det \tilde{g}^{(L)}(x_n; \theta)\Big)^2 + \lambda_{\text{iso}} \frac{1}{N}\sum_{n=1}^N \|\tilde{g}^{(L)}(x_n; \theta) - I_2\|_F^2$$
 
 - **Requires 3rd-Order Automatic Differentiation**: Computing $\nabla_\theta \mathcal{L}_{\text{geom}}(\theta)$ backpropagates through 3rd-order mixed spatio-parametric derivatives $\frac{\partial^3 \Phi^{(L)}_\theta(x)}{\partial \theta \partial x^i \partial x^j}$.
-- **Purely Geometric Inference Rule**: At test time, any point $x^*$ is classified strictly by local manifold curvature ($\hat{y}(x^*) = \mathbb{I}[K(x^*; \theta) > 0]$ for $C=2$).
+- **Purely Geometric Inference Rule**: At test time, any point $x^*$ is classified strictly by local manifold curvature ($\hat{y}(x^*) = \mathbb{I}[K(x^*; \theta) > 0]$ for $C=2$, or ordered curvature bands for $C > 2$).
+
+### Setup & Dataset Loading
+The setup cell below loads `config.yaml` using the exact `LAYER_DIMS` (no extra output logit channels are needed even when `N_CLASSES > 2`, because classification uses the scalar intrinsic curvature field $K^{(L)}(x)$) and builds the 2D evaluation grid.
 """,
         },
         {
@@ -1121,7 +1247,14 @@ print(
             "type": "markdown",
             "source": r"""
 ## 1. End-to-End 3rd-Order Autodiff Training with Purely Geometric Curvature Loss
-We optimize $\mathcal{L}_{\text{geom}}(\theta)$ for 90 epochs with Adam (`lr=0.025`) and margin $\tau = 0.40$, tracking the separation of Gaussian curvature across classes.
+
+### What This Experiment Does
+We train `geom_model` from scratch for `90` `Adam` epochs (`lr = 0.025`, gradient clipping `5.0`) using **exclusively** `curvature_margin_loss` (`margin = 0.40`, `lambda_vol = 0.02`, `lambda_iso = 0.005`, `k_clip = 10.0`) computed from the exact final-layer Graph immersion metric $\tilde{g}^{(L)} = I_2 + J^T J$. Raw output coordinates $z(x)$ never appear in any target or classifier; both train and test accuracy are evaluated strictly from the sign/band of $K^{(L)}(x)$ via `scalar_geometric_predict`.
+
+### How to Interpret the Printed Checkpoints & Plots
+- **Printed Checkpoints (`Epoch 1, 20, 45, 90`)**: Track elapsed seconds, total geometric loss, purely curvature-based `Train Acc` and `Test Acc`, and class-conditional mean curvatures `E[K|y=0]` and `E[K|y=1]`.
+- **Left Plot (`Purely Geometric Curvature Training Convergence`)**: Purple curve shows `curvature_margin_loss` decreasing smoothly while purely geometric `Train Acc` (blue dashed) and held-out `Test Acc` (green solid) climb from random chance toward high classification accuracy.
+- **Right Plot (`Bifurcation of Manifold Curvature by Class`)**: Starting near $K \approx 0$ at initialization, `Class 0` mean curvature (blue) is driven below the negative target margin $-\tau$ (hyperbolic saddle regime) while `Class 1` mean curvature (red) is driven above $+\tau$ (elliptic dome regime).
 """,
         },
         {
@@ -1214,7 +1347,13 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 2. Learned 2D Gaussian Curvature Landscape & Zero-Curvature Decision Boundary ($K(x) = 0$)
-We evaluate $K^{(L)}(x)$ over the entire 2D grid and on the held-out test set.
+
+### What This Experiment Does
+We evaluate the trained network's exact intrinsic Gaussian curvature $K^{(L)}(x)$ across the 2D ambient grid (`grid_pts`) and across all held-out test points `X_test`, classifying test samples purely via `scalar_geometric_predict(K_test)`.
+
+### How to Interpret the Spatial Contour Map & Test Histogram
+- **Left Plot (`Learned Curvature Field & Decision Boundary`)**: Diverging `RdBu_r` contour map of $\mathrm{arcsinh}(K^{(L)}(x))$. **Blue regions ($K < 0$)** are hyperbolic saddle basins assigned to Class `0`; **red regions ($K > 0$)** are elliptic dome regions assigned to Class `1`; the **solid black contour** marks the zero-curvature parabolic inflection curve $K^{(L)}(x) = 0$ (or multi-class band thresholds $b_c$) acting as the intrinsic decision boundary.
+- **Right Plot (`Held-Out Test Set Curvature Distribution`)**: Class-colored histograms of raw $K^{(L)}(x)$ values on unseen `X_test` points relative to the **dashed black decision threshold**. Clean separation on opposite sides of $K = 0$ confirms generalization of the learned curvature geometry to held-out data.
 """,
         },
         {
@@ -1266,7 +1405,14 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 3. 3D Visualization of the Learned Output Surface Coloured by Intrinsic Gaussian Curvature $K(x)$
-We visualize the learned graph surface $(x^1, x^2, z^1(x))$ in $\mathbb{R}^3$ coloured by its exact Gaussian curvature $K^{(L)}(x)$, illustrating how the neural network bends the manifold into hyperbolic saddles ($K < 0$, blue) vs. elliptic domes ($K > 0$, red).
+
+### What This Experiment Does
+To see physically *how* the neural network sculpts positive vs. negative Gaussian curvature without coordinate supervision, we plot the 3D Monge graph $(x^1, x^2, z^1(x)) \subset \mathbb{R}^3$ over the 2D input plane and color every surface element by its exact intrinsic Gaussian curvature $\mathrm{arcsinh}(K^{(L)}(x))$, overlaying held-out test points slightly above the surface.
+
+### How to Interpret the 3D Surface Geometry
+- **Blue Saddle Regions ($K = \kappa_1 \kappa_2 < 0$, Class `0`)**: The surface curves upward along one principal direction and downward along the orthogonal direction (hyperbolic saddle geometry).
+- **Red Dome/Bowl Regions ($K = \kappa_1 \kappa_2 > 0$, Class `1`)**: Both principal curvatures bend in the same direction (elliptic bowl or dome geometry).
+- **White Inflection Crease ($K = 0$)**: Marks the parabolic transition locus where one principal curvature changes sign—forming the purely differential-geometric decision boundary between classes.
 """,
         },
         {
@@ -1328,6 +1474,9 @@ We synthesize our investigation by comparing **three purely geometric training o
    Separates classes by directional metric stretching $\log(g^{(L)}_{11}(x) / g^{(L)}_{22}(x))$.
 
 Finally, we analyze the **back-reaction on the Parameter Manifold ($\Theta$)**: how training with purely geometric objectives on the data manifold reshapes the layerwise curvature profile $K^{(1 \dots L)}$ and the $P \times P$ Parameter Manifold metric spectrum $G^{\Theta}_{\mu\nu}(\theta) = \mathbb{E}_x[(J_\theta z)^T (J_\theta z)]$.
+
+### Setup & Shared Dataset Initialization
+The setup cell below loads `config.yaml` and builds the shared train/test split and evaluation grid (`grid_pts`) so all four training paradigms start from identical data and random seeds (`seed = 7`).
 """,
         },
         {
@@ -1394,6 +1543,17 @@ print(
             "type": "markdown",
             "source": r"""
 ## 1. Training the Four Paradigms (Cross-Entropy vs. Three Purely Geometric Objectives)
+
+### What This Experiment Does
+We train four identically initialized MLPs (`seed = 7`) using `Adam`:
+1. **`m_ce` (`Cross-Entropy Baseline`, 120 epochs)**: Standard coordinate logit supervision (`argmax_c z_c(x)`).
+2. **`m_curv` (`Gaussian Curvature Margin Loss`, 85 epochs)**: 3rd-order autodiff separating classes by intrinsic graph curvature $K^{(L)}(x)$ (`margin = 0.40`).
+3. **`m_vol` (`Volume-Element Contrastive Loss`, 100 epochs)**: 2nd-order autodiff separating classes by log area density $\log\sqrt{\det g^{(L)}(x)}$ (`margin = 0.60`).
+4. **`m_aniso` (`Metric Anisotropy Loss`, 100 epochs)**: 2nd-order autodiff separating classes by directional stretching $\log(g^{(L)}_{11}(x)/g^{(L)}_{22}(x))$ (`margin = 0.45`).
+
+### How to Interpret the Summary Table
+- **`Decision Criterion`**: Highlights the fundamental conceptual divide—Row 1 inspects raw output coordinates $z_c(x)$, whereas Rows 2–4 classify unseen test points strictly via **coordinate-free differential invariants** (`scalar_geometric_predict`).
+- **`Test Accuracy`**: Shows that first-fundamental-form metric invariants (`Volume-Element` and `Metric Anisotropy`, which need only 2nd-order derivatives) match or surpass 3rd-order `Gaussian Curvature` and rival standard `Cross-Entropy`.
 """,
         },
         {
@@ -1465,6 +1625,17 @@ print(f"{'4. Geometric Metric Anisotropy Loss':<44} {f'log(g_11^({L}) / g_22^({L
             "type": "markdown",
             "source": r"""
 ## 2. Side-by-Side Comparison of the Learned Geometric Decision Landscapes
+
+### What This Experiment Does
+We evaluate each of the four trained models across the 2D ambient grid (`grid_pts`) using **its own native classification scalar**: logit gap $z_1(x) - z_0(x)$ for Cross-Entropy, $\mathrm{arcsinh}(K^{(L)}(x))$ for Curvature, $\log\sqrt{\det g^{(L)}(x)}$ for Volume-Element, and $\log(g^{(L)}_{11}(x)/g^{(L)}_{22}(x))$ for Metric Anisotropy.
+
+### How to Interpret the $1 \times 4$ Landscape Comparison
+- **Diverging `RdBu_r` Scale (`Blue < 0`, `White = 0`, `Red > 0`)**: In all four panels, blue regions predict Class `0`, red regions predict Class `1` (for binary classification), and the **solid black `0.0` level curve** marks the exact decision boundary:
+  - Panel 1: Equal-logit hyperplane pullback ($z_1 = z_0$).
+  - Panel 2: Zero-curvature parabolic inflection curve ($K = 0$).
+  - Panel 3: Equiareal volume-preserving curve ($\det g = 1$).
+  - Panel 4: Conformal/isotropic directional balance curve ($g_{11} = g_{22}$).
+- Despite optimizing four distinct mathematical quantities, all four objectives recover consistent nonlinear decision boundaries separating the test data.
 """,
         },
         {
@@ -1514,8 +1685,14 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 3. Layerwise Curvature Profiles & Back-Reaction on the $P \times P$ Parameter Manifold Metric
-Finally, we compare how the four training objectives distribute curvature across layers $\ell \in \{1, \dots, L\}$ and how they shape the eigenspectrum of the $P \times P$ Generalized Gauss-Newton / Output Pullback Metric on the parameter manifold $\Theta$:
+
+### What This Experiment Does
+We compare how the four training objectives distribute curvature across network depth $\ell \in \{1, \dots, L\}$ and how they reshape the eigenspectrum of the $P \times P$ Generalized Gauss-Newton / Output Pullback Metric on the parameter manifold $\Theta$:
 $$G^\Theta_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}} \left[ \sum_{a=1}^{d_L} \frac{\partial z^a(x; \theta)}{\partial \theta^\mu} \frac{\partial z^a(x; \theta)}{\partial \theta^\nu} \right]$$
+
+### How to Interpret the Two-Panel Plot
+- **Left Plot (`Layerwise Class Curvature Separation`)**: Plots $\Delta \mathrm{arcsinh}(K^{(\ell)}) = \mathbb{E}[\mathrm{arcsinh}(K^{(\ell)}) \mid y = C-1] - \mathbb{E}[\mathrm{arcsinh}(K^{(\ell)}) \mid y = 0]$ across layers. Notice that **only** `Curvature Loss` (red) produces a large positive jump at the final layer `L`, whereas `Cross-Entropy`, `Volume`, and `Anisotropy` stay near zero—demonstrating that curvature separation does not arise by accident under lower-order objectives.
+- **Right Plot (`Induced Parameter Manifold Metric Spectrum`, log–log)**: Reveals the **back-reaction of data-space losses on $\Theta$**. Compare the eigenvalue decay rate and top stiffness of the three geometric models against `Cross-Entropy` (blue): geometric metric regularizers prevent extreme rank collapse and redistribute sensitivity across more active parameter directions.
 """,
         },
         {
@@ -1584,8 +1761,15 @@ plt.show()
             "source": r"""
 ## 4. Layerwise Log Volume Profiles ($\log\sqrt{\det g^{(\ell)}(x)}$)
 
-Next, we examine how each of the four training paradigms transforms the **local Riemannian log-volume density** across network depth $\ell \in \{1, \dots, L\}$:
+### What This Experiment Does
+We evaluate the **local Riemannian log-volume density** across all layers $\ell \in \{1, \dots, L\}$ on `X_test` for all four trained models:
 $$\log \rho_{\text{vol}}^{(\ell)}(x; \theta) = \log\sqrt{\det g^{(\ell)}(x; \theta)} = \frac{1}{2}\log \det g^{(\ell)}(x; \theta)$$
+tracking both per-class means (`Class C-1` vs. `Class 0`) and the signed class separation gap $\Delta \log\sqrt{\det g^{(\ell)}}$.
+
+### How to Interpret the Table & Two-Panel Figure
+- **Printed Gap Table (`L1 Gap ... LL Gap`)**: Reports the signed difference in mean log-volume between `Class C-1` and `Class 0` at every layer. Look at the final column (`LL Gap`): `Volume-Element Loss` achieves a large positive gap ($> +1$), whereas all other methods sit near `0`.
+- **Left Plot (`Per-Class Layerwise Log-Volume Trajectories`)**: Solid lines (`Class C-1`) vs. dashed lines (`Class 0`). For `Volume-Element Loss` (green), the two classes split cleanly onto opposite sides of the dotted zero line ($\det g = 1$) at Layer `L`; for `Curvature` (red) and `Anisotropy` (orange), both classes stay anchored near `0` thanks to $(\log\det g)^2$ stabilization.
+- **Right Plot (`Layerwise Class Log-Volume Separation`)**: Directly visualizes how volume contrast builds progressively through hidden layers and peaks sharply at the output manifold exclusively under `Volume-Element Loss`.
 """,
         },
         {
@@ -1641,7 +1825,12 @@ plt.show()
             "source": r"""
 ## 5. Layerwise Metric Anisotropy Profiles ($\log(g^{(\ell)}_{11}/g^{(\ell)}_{22})$ & Spectral Condition Number $\lambda_1^{(\ell)}/\lambda_2^{(\ell)}$)
 
-We analyze how directional stretching and spectral anisotropy of the pullback metric tensor $g^{(\ell)}_{ij}(x; \theta)$ evolve across layers $\ell \in \{1, \dots, L\}$ under the four training objectives.
+### What This Experiment Does
+We evaluate how all four training objectives shape directional stretching across depth $\ell \in \{1, \dots, L\}$ on `X_test`, measuring both the **signed class polarization gap** $\Delta \log(g^{(\ell)}_{11}/g^{(\ell)}_{22})$ and the **mean spectral log-condition number** $\mathbb{E}[\log_{10}(\lambda_1^{(\ell)}/\lambda_2^{(\ell)})]$.
+
+### How to Interpret the Table & Two-Panel Figure
+- **Printed Table & Left Plot (`Layerwise Class Directional Anisotropy Separation`)**: `Metric Anisotropy Loss` (orange) uniquely drives a large positive polarization gap at Layer `L` (stretching $x^1$ on Class `C-1` and $x^2$ on Class `0`), while the other three methods remain near zero directional gap.
+- **Right Plot (`Layerwise Spectral Condition Number Across Depth`)**: Highlights a striking geometric difference between coordinate and geometric training: `Cross-Entropy` (blue) exhibits severe spectral ill-conditioning ($\lambda_1/\lambda_2 \gg 10^2$) at the output layer because unconstrained softmax training collapses within-class directions, whereas all three geometric losses preserve well-conditioned, non-degenerate 2D immersions via volume regularization.
 """,
         },
         {
@@ -1704,6 +1893,11 @@ A critical practical distinction between the four training objectives is their *
 | **2. Gaussian Curvature Loss** | $2$nd-order ($\partial_l\partial_k g_{ij}(x; \theta)$) | **3rd-order** ($\nabla_\theta \partial_x^2 g_{ij}$) | Nested `vmap(jacrev(jacrev(jacrev)))` + backward |
 | **3. Volume-Element Loss** | $1$st-order ($J(x; \theta) = \partial_x z$) | **2nd-order** ($\nabla_\theta \partial_x z$) | `vmap(jacrev)` + backward |
 | **4. Metric Anisotropy Loss** | $1$st-order ($J(x; \theta) = \partial_x z$) | **2nd-order** ($\nabla_\theta \partial_x z$) | `vmap(jacrev)` + backward |
+
+### What This Experiment Does & How to Interpret the Results
+We profile a single `forward + backward` step for each of the four exact objectives (`benchmark_method`), recording wall-clock step latency (`ms/step`), CPU tensor memory allocation via `torch.profiler` (`MB/step`), and total backward graph nodes (`count_autograd_graph_nodes`):
+- **Printed Table & Bar Charts (Left & Middle)**: Show a clean staircase determined by differential order—`1st-order` Cross-Entropy is cheapest, `2nd-order` metric losses (`Volume-Element` and `Metric Anisotropy`) add only a small constant factor in latency and memory while preserving high test accuracy, and `3rd-order` `Gaussian Curvature` jumps by an order of magnitude due to nested reverse-mode graph expansion.
+- **Right Scatter Plot (`Compute vs. Memory Scaling by Differential Order`)**: Plots `Latency` vs. `Memory` on log–log axes with bubble area scaled by memory footprint and labels showing autograd node counts and held-out test accuracy—motivating the 1st-order approximations developed in Notebook 07.
 """,
         },
         {
@@ -1836,7 +2030,12 @@ plt.show()
             "source": r"""
 ## 7. $3 \times 4$ Cross-Evaluation Matrix of Final-Layer Geometric Fields Across All Experiments
 
-Finally, we evaluate **all three differential-geometric measures** at the final layer ($\ell = L$) across **all four trained networks** in the 2D input space $(x^1, x^2)$.
+### What This Experiment Does
+To test **geometric selectivity (orthogonality of objectives)**, we evaluate **all three differential-geometric invariants (rows)**—Gaussian Curvature $\mathrm{arcsinh}(K^{(L)})$, Log Volume $\log\sqrt{\det g^{(L)}}$, and Metric Anisotropy $\log(g^{(L)}_{11}/g^{(L)}_{22})$—across **all four trained networks (columns)** (`Cross-Entropy`, `Curvature`, `Volume-Element`, `Metric Anisotropy`), computing the test accuracy each geometric invariant achieves on every model.
+
+### How to Interpret the $3 \times 4$ Matrix
+- **Bold Diagonal Target Panels (`★ Target` at `(Row 0, Col 1)`, `(Row 1, Col 2)`, `(Row 2, Col 3)`)**: Each geometric model cleanly separates Class `0` (blue, `< 0`) from Class `1` (red, `> 0`) along the solid black `0.0` contour **in the exact geometric invariant it was trained to optimize**, achieving high held-out accuracy.
+- **Off-Diagonal Panels & Column 0 (`Cross-Entropy Baseline`)**: Hover near random-chance geometric accuracy (~`40%–65%`) because non-target invariants are either regularized toward `0.0` (white) or concentrated symmetrically along the boundary rather than taking opposite signs on the two classes. This confirms that curvature, volume density, and metric anisotropy act as **independent, controllable geometric channels** on $\mathcal{M}_L$.
 """,
         },
         {
@@ -1950,6 +2149,9 @@ Consequently, the Riemannian metric on parameter space $\Theta$ should **depend 
 4. **Coupled Data-Geometry Pullback NGD ($G^{\Theta,\text{DeWitt}}$ & $G^{\Theta,\text{coupled}}$)**: Pulls back the **affine-invariant DeWitt / Ebin metric** on $2 \times 2$ SPD metric tensors $\mathrm{Sym}^+_2$ alongside the Generalized Gauss-Newton (GGN) metric of the target geometric scalar field $\psi(x; \theta)$:
    $$G^{\Theta,\text{DeWitt}}_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\!\left[ g^{ik}(x; \theta)\, g^{jl}(x; \theta)\, \frac{\partial g_{ij}(x; \theta)}{\partial \theta^\mu} \frac{\partial g_{kl}(x; \theta)}{\partial \theta^\nu} \right]$$
    $$G^{\Theta,\text{coupled}}_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\!\left[ w_\psi(x; \theta) \frac{\partial \psi(x; \theta)}{\partial \theta^\mu} \frac{\partial \psi(x; \theta)}{\partial \theta^\nu} \right] + \gamma\, G^{\Theta,\text{DeWitt}}_{\mu\nu}(\theta) + G^{\Theta,\text{reg}}_{\mu\nu}(\theta) + \lambda I_P$$
+
+### Setup & Dataset Initialization
+The setup cell below loads `config.yaml` and generates the train/test split and ambient 2D grid (`grid_pts`) used across all coupled vs. uncoupled optimization experiments.
 """,
         },
         {
@@ -2024,11 +2226,19 @@ print(
             "source": r"""
 ## 1. Exact $E(2)$ Output Symmetry Quotienting & Spectral Structure on $\Theta$
 
-When `OUTPUT_ACTIVATION = "identity"`, all three geometric objectives depend exclusively on $J_x(x)^T J_x(x)$ (or $I_2 + J_x(x)^T J_x(x)$), which is **strictly invariant under rigid Euclidean motions acting on output coordinates** $z \mapsto Qz + b$:
-- **Output Translations**: Shifting the final bias $b^{(L)} \mapsto b^{(L)} + \delta b$.
-- **Output Rotation ($\mathfrak{so}(d_L)$)**: Rotating the final layer $(W^{(L)}, b^{(L)}) \mapsto (e^{\epsilon \Omega} W^{(L)}, e^{\epsilon \Omega} b^{(L)})$.
+### What This Experiment Does
+1. **Gauss-Equation Consistency Check**: Verifies that `compute_fast_graph_geometry` (algebraic Gauss identity via `jacfwd^2`) matches `compute_layer_geometry` (`jacrev^3`) to `float64` machine precision ($\sim 10^{-16}$).
+2. **Gauge-Direction Norm Test**: Constructs four unit parameter vectors $v \in \mathbb{R}^P$ ($\|v\|_2 = 1$) at initialization:
+   - Two pure output translations (`Trans. z^1 (bL_0)` and `Trans. z^2 (bL_1)`), shifting $b^{(L)}$.
+   - One infinitesimal output rotation (`Rot. so(2) (WL,bL)`), rotating $(W^{(L)}, b^{(L)}) \mapsto (W^{(L)} + \epsilon \Omega W^{(L)},\; b^{(L)} + \epsilon \Omega b^{(L)})$.
+   - One generic random hidden-layer direction (`Generic Hidden Dir.`).
+   We evaluate the undamped quadratic form $|v^T G^\Theta v|$ across `Uncoupled I_P`, `Uncoupled Coord-GGN`, `Coupled DeWitt`, and `Coupled Curvature-GGN`, and plot the full $P \times P$ eigenspectra of the four parameter metrics.
 
-Below we verify that `compute_fast_graph_geometry` matches `compute_layer_geometry` to `float64` machine precision and evaluate $v^T G^\Theta v$ along these output symmetry generators.
+### How to Interpret the Table & Two-Panel Figure
+- **Printed Table & Left Bar Chart (`Exact Quotienting of E(2) Output Symmetries`, log scale)**:
+  - When `OUTPUT_ACTIVATION = "identity"`, translating or rotating output coordinates $z \mapsto Qz + b$ leaves $J_x^T J_x$ and $K(x)$ **identically unchanged**—so the first three directions are pure zero-effect gauge symmetries.
+  - `Uncoupled I_P` (`1.0`) and `Uncoupled Coord-GGN` ($\sim 10^{-1}$–$10^0$) falsely treat these output motions as stiff directions, whereas `Coupled DeWitt` and `Coupled Curvature-GGN` send $|v^T G^\Theta v|$ to numerical zero ($\sim 10^{-32}$–$10^{-18}$) while remaining strictly positive on `Generic Hidden Dir.`! *(Note: if `OUTPUT_ACTIVATION` is set to a nonlinear function such as `"tanh"`, output shifts/rotations alter activation saturation and cease to be exact symmetries, which the coupled metrics automatically reflect.)*
+- **Right Plot (`Parameter Metric Spectra at Initialization`, log–log)**: Shows how coupled metrics concentrate spectral weight onto genuine metric- and curvature-deforming parameter modes while quotienting redundant gauge directions into the nullspace.
 """,
         },
         {
@@ -2152,7 +2362,19 @@ plt.show()
             "source": r"""
 ## 2. Coupled vs. Uncoupled Optimization Across All Three Purely Geometric Losses
 
-We now train identical configured MLPs (`seed = 7`) for **45 optimization steps** across all three purely geometric classification paradigms, comparing **Uncoupled Euclidean GD**, **Uncoupled Adam**, **Uncoupled Coord-NGD** ($G^{\Theta,\text{coord}}$), and **Coupled Geom-NGD** ($G^{\Theta,\text{coupled}}$).
+### What This Experiment Does
+We train identically initialized MLPs (`seed = 7`) for `N_STEPS = 45` optimization steps across all three purely geometric objectives (`volume`, `anisotropy`, `curvature`), comparing four parameter-space optimizers:
+1. **`Uncoupled GD (I_P)`**: Standard Euclidean gradient descent in $\mathbb{R}^P$.
+2. **`Uncoupled Adam`**: Coordinate-wise diagonal second-moment preconditioning.
+3. **`Uncoupled Coord-NGD`**: Natural Gradient using the uncoupled output-coordinate metric $G^{\Theta,\text{coord}}$ with geodesic trust-region radius $0.85$.
+4. **`Coupled Geom-NGD`**: Natural Gradient using the data-geometry-coupled metric $G^{\Theta,\text{coupled}}$ with the exact same trust-region radius $0.85$.
+
+### How to Interpret the Table & $2 \times 3$ Convergence Grid
+- **Summary Table Columns**:
+  - `Step 10 Acc` & `Step 25 Acc`: Early-step held-out geometric test accuracy—highlighting how fast each optimizer sculpts class-separating geometry in minimal iterations.
+  - `Final Loss` & `Final Test Acc`: Solution quality after 45 steps.
+  - `bL Gauge Drift`: Euclidean drift $\|b^{(L)}(45) - b^{(L)}(0)\|_2$ of the final-layer bias vector (diagnostic for spurious motion along gauge directions when `OUTPUT_ACTIVATION = "identity"`).
+- **Top Row (`Geometric Loss`, log scale) & Bottom Row (`Held-Out Test Accuracy`)**: Across all three columns (`Volume-Element`, `Metric Anisotropy`, `Gaussian Curvature`), `Coupled Geom-NGD` (bold green solid) achieves the steepest loss descent and earliest plateau at high test accuracy, with its largest advantage appearing on stiff 3rd-order `Gaussian Curvature`.
 """,
         },
         {
@@ -2362,7 +2584,13 @@ plt.show()
             "source": r"""
 ## 3. $3 \times 4$ Spatial Decision Landscapes: Coupled vs. Uncoupled Learned Manifolds
 
-To inspect how parameter-data metric coupling shapes the learned representation manifold in ambient input space $(x^1, x^2)$, we plot the learned target geometric field $\psi(x^1, x^2)$ after 45 steps across all **3 geometric objectives (rows)** and **4 optimizers (columns)**.
+### What This Experiment Does
+We take all `12` trained models from Section 2 (`3 geometric tasks x 4 optimizers` at step 45) and evaluate each model's target geometric scalar field $\psi(x^1, x^2)$ across the ambient 2D grid (`grid_pts`).
+
+### How to Interpret the $3 \times 4$ Spatial Grid
+- **Rows**: Target geometric invariant (`Row 0`: Log Volume $\log\sqrt{\det g^{(L)}}$; `Row 1`: Metric Anisotropy $\log(\tilde{g}^{(L)}_{11}/\tilde{g}^{(L)}_{22})$; `Row 2`: Gaussian Curvature $\mathrm{arcsinh}(K^{(L)})$).
+- **Columns**: Optimizer (`Col 0`: `Uncoupled GD`; `Col 1`: `Uncoupled Adam`; `Col 2`: `Uncoupled Coord-NGD`; `Col 3`: `Coupled Geom-NGD` in bold).
+- **Visual Takeaway**: Compare Column 3 against Columns 0–2 along each row. `Coupled Geom-NGD` produces sharper blue-vs.-red margin saturation and cleaner black `0.0` decision boundaries in 45 steps—especially in Row 2 (`Curvature`), where `Uncoupled GD` remains stuck in a high-loss, poorly separated geometry.
 """,
         },
         {
@@ -2430,9 +2658,16 @@ plt.show()
             "source": r"""
 ## 4. Mechanistic Diagnostics: Spurious Gauge Drift & Unclipped Curvature Stiffness
 
-Comparing the optimization trajectories exposes **two fundamental geometric mechanisms** distinguishing coupled from uncoupled parameter metrics:
-1. **Elimination of Cross-Covariance Gauge Drift (`Uncoupled Coord-NGD` vs. `Coupled Geom-NGD`)**.
-2. **Intrinsic Stiffness Preconditioning Without Gradient Clipping**.
+### What This Experiment Does
+We isolate the **two concrete mathematical mechanisms** responsible for `Coupled Geom-NGD`'s advantage:
+1. **Gauge-Drift Tracking**: Compares the trajectory of final-bias drift $\|b^{(L)}(t) - b^{(L)}(0)\|_2$ across steps `0..45` between `Uncoupled Coord-NGD` and `Coupled Geom-NGD` for all three geometric tasks.
+2. **Unclipped High-Margin Curvature Stress Test**: Runs `35` curvature-loss optimization steps at a wider margin (`margin = 0.65`, `k_clip = 25.0`) **with all heuristic gradient clipping removed**, comparing `Uncoupled GD (Unclipped, lr=0.07)` against `Coupled Geom-NGD (Unclipped, lr=0.28)`.
+
+### How to Interpret the Three-Panel Diagnostic Plot
+- **Left Plot (`Spurious Translation Gauge Drift on Theta`)**: When `OUTPUT_ACTIVATION = "identity"`, the true gradient with respect to $b^{(L)}$ is identically zero ($\nabla_{b^{(L)}}\mathcal{L}_{\mathrm{geom}} = 0$). Yet `Uncoupled Coord-NGD` (dash-dot curves) continuously drifts $b^{(L)}(t)$ because $G^{\Theta,\text{coord}}$ mixes hidden weights $W$ with output shifts $b^{(L)}$ via off-diagonal cross-covariances! `Coupled Geom-NGD` (solid flat lines at `0`) respects the $E(d_L)$ quotient exactly, eliminating wasted gauge motion.
+- **Middle Plot (`Unclipped 3rd-Order Curvature Loss`) & Right Plot (`Euclidean Gradient Norm`, log scale)**:
+  - Notice the violent multi-order-of-magnitude spikes in $\|\nabla_\theta \mathcal{L}_{\mathrm{curv}}\|_2$ (Right, red dashed) whenever surface folds sharpen (`K = R_{1212}/\det\tilde{g}`).
+  - Without gradient clipping, `Uncoupled GD` (red dashed) overshoots across curvature cliffs and destabilizes in loss (Middle). `Coupled Geom-NGD` (green solid) preconditions directly by $(\nabla_\theta K)^T \nabla_\theta K$, automatically shrinking Euclidean step lengths whenever curvature sensitivity spikes and descending smoothly **without needing manual gradient clipping**.
 """,
         },
         {
@@ -2533,6 +2768,17 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 5. Ablation: Universal Unsupervised DeWitt Metric ($G^{\Theta,\text{DeWitt}}$) vs. Task-Coupled Metric ($G^{\Theta,\text{coupled}}$)
+
+### What This Experiment Does
+$G^{\Theta,\text{coupled}}(\theta)$ combines two geometric pullbacks:
+1. **The unsupervised, task-agnostic DeWitt metric $G^{\Theta,\text{DeWitt}}(\theta)$**: Pulls back the canonical affine-invariant metric $\mathrm{Tr}(g^{-1}\partial_\mu g\, g^{-1}\partial_\nu g)$ on $2 \times 2$ SPD matrices $\mathrm{Sym}^+_2$, depending **only** on $X$ and $g(x; \theta)$ (zero dependence on class labels $y$ or the chosen loss invariant $\psi$).
+2. **The task-specific GGN / Sobolev term $\mathbb{E}[w_\psi \nabla_\theta \psi \otimes \nabla_\theta \psi]$**: Pulls back the sensitivity of the target geometric scalar $\psi \in \{\log\sqrt{\det g}, \log(\tilde{g}_{11}/\tilde{g}_{22}), K\}$.
+
+Here we train `Pure DeWitt-NGD` (using $G^{\Theta,\text{DeWitt}}$ alone) for 45 steps across all three tasks and compare its loss curves and final test accuracies against `Uncoupled GD` and `Task-Coupled Geom-NGD`.
+
+### How to Interpret the Three-Panel Ablation & Summary Table
+- **Columns 1 & 2 (`Volume-Element` and `Metric Anisotropy`, 1st-fundamental-form tasks)**: `Coupled DeWitt-NGD` (blue dashed) tracks `Task-Coupled Geom-NGD` (green solid) almost identically, capturing virtually the entire speedup over `Uncoupled GD` (gray dotted)—because $\det g$ and $g_{11}/g_{22}$ are smooth algebraic functions of $g(x; \theta)$ whose stiffness is already controlled by the DeWitt metric on $\mathrm{Sym}^+_2$.
+- **Column 3 (`Gaussian Curvature`, 2nd-fundamental-form task)**: `Coupled DeWitt-NGD` still strongly outperforms `Uncoupled GD`, while `Task-Coupled Geom-NGD` achieves an additional loss and accuracy improvement—because Gaussian curvature $K(x)$ depends on **spatial derivatives of the metric** (2nd-order jets $\partial_x^2 z$), requiring the extra 2nd-order Sobolev stiffness carried by $\nabla_\theta K \otimes \nabla_\theta K$.
 """,
         },
         {
@@ -2627,10 +2873,28 @@ Training neural networks with **exact differential-geometric losses** requires n
 
 In this notebook, we implement and benchmark **four principled approaches** that reduce compute and memory toward standard **1st-order `SGD` with Cross-Entropy loss** by replacing symbolic spatial derivatives with forward-only discrete or algebraic geometric operators:
 
-1. **Approach 1 — Batched Finite-Difference Stencils (Pure 1st-Order Autodiff)**
-2. **Approach 2 — Precomputed Point-Cloud $k$-NN Taylor Jet Operators (`1N` Single Forward Pass)**
-3. **Approach 3 — Randomized Tangent-Plane Sketching / Hutchinson Directional Probes ($O(1)$ in Input Dimension $d_0$)**
-4. **Approach 4 — Algebraic Order Reduction Before Autodiff (Gauss's Extrinsic-to-Intrinsic Identity)**
+1. **Approach 1 — Batched Finite-Difference Stencils (Pure 1st-Order Autodiff)**: Evaluates spatial Jacobians and Hessians via batched perturbed forward passes (`3N` points for metric losses, `7N` central stencil points for Gaussian curvature) so `loss.backward()` differentiates through standard forward passes only.
+2. **Approach 2 — Precomputed Point-Cloud $k$-NN Taylor Jet Operators (`1N` Single Forward Pass)**: Fits Gaussian-weighted local linear (`order=1`) and quadratic (`order=2`) least-squares Taylor operators on the training point cloud once offline at $t = 0$, estimating spatial derivatives at every training step from a **single `1N` forward pass** $Z = f_\theta(X)$.
+3. **Approach 3 — Randomized Tangent-Plane Sketching / Hutchinson Directional Probes ($O(1)$ in Input Dimension $d_0$)**: Replaces full $d_0$-coordinate stencils with $m = 1$ or $2$ random orthonormal tangent probes (`2N`–`3N` evaluations for metric invariants, `7N` along a random 2-plane for sectional/Gaussian curvature), eliminating dependence on ambient input dimension $d_0$.
+4. **Approach 4 — Algebraic Order Reduction Before Autodiff (Gauss's Extrinsic-to-Intrinsic Identity)**: Rewrites intrinsic graph curvature $K = R_{1212}/\det\tilde{g}$ algebraically via Gauss's equation directly in terms of $(J, H)$ using 2nd-order forward-mode spatial AD (`jacfwd(jacfwd(phi))`) instead of differentiating the metric tensor with 3rd-order reverse-mode AD (`jacrev^3`).
+
+---
+
+## 1. Setup, Offline Jet Precomputation & Numerical Approximation Fidelity
+
+### What This Experiment Does
+1. **Configuration & Offline $k$-NN Precomputation**: Loads the dataset and MLP architecture from `config.yaml` and precomputes the fixed point-cloud $k$-NN Taylor operators (`knn_op_lin` with $k = 10$ for 1st-order Jacobians; `knn_op_quad` with $k = 16$ for 2nd-order jets) once before training begins.
+2. **Reference Manifold Preparation**: Trains a reference MLP (`ref_mlp`) for 100 `SGD` epochs with Cross-Entropy so its output representation forms a genuinely curved, non-trivial manifold on which approximation errors can be measured meaningfully.
+3. **Step-Size Sweep & Pointwise Curvature Validation**: Evaluates exact log-volume $\log\sqrt{\det g}$ and exact Gaussian curvature $K^{(L)}$ (`Levi-Civita` vs. `Gauss equation`), sweeps finite-difference step sizes $h \in [10^{-6}, 10^{-1}]$, and compares pointwise curvature estimates from the 7-point FD stencil (`Approach 1`) and the single-pass $k$-NN quadratic jet (`Approach 2`) against exact analytical curvature.
+
+### How to Interpret the Printed Metrics & Plots
+- **Printed Diagnostics**:
+  - `Offline t=0 k-NN Jet Precomputation`: One-time setup latency (typically a few milliseconds) amortized over the entire training run, plus operator tensor shapes `(N, m_dim, k)`.
+  - `Approach 4 (Gauss Eq.) max |K_gauss - K_levi_civita|`: Should sit near `float64` machine precision ($\sim 10^{-15}$–$10^{-14}$), confirming that Approach 4 is **mathematically exact** rather than an approximation.
+  - `Approach 1 (7-pt FD, h=2e-3) mean |K_fd - K_exact|`: Typical pointwise curvature error ($\sim 10^{-5}$–$10^{-4}$), showing near-exact fidelity from pure forward evaluations.
+  - `Approach 2 (1N k-NN Jet) Pearson r(K_knn, K_exact)`: Measures spatial correlation between the zero-perturbation `1N` graph-regression curvature and exact analytical curvature; high positive $r$ confirms it captures the true sign and coarse magnitude of $K(x)$ despite finite sample spacing.
+- **Left Plot (`Stencil Truncation vs. Floating-Point Roundoff Scaling`)**: Classic numerical-analysis "V-curve" on log–log axes. Moving right-to-left (shrinking $h$), truncation error drops at rate $O(h)$ for the 3-point forward metric stencil (blue) and $O(h^2)$ for the symmetric 7-point central curvature stencil (red), until `float64` subtractive cancellation causes roundoff error to rise for very small $h \lesssim 10^{-5}$ (especially for 2nd-order differences dividing by $h^2$). The minimum around $h \in [10^{-4}, 3 \times 10^{-3}]$ justifies our default stencil widths.
+- **Right Plot (`Pointwise Curvature Fidelity on Trained Network`)**: Scatter plot of approximated vs. exact $\mathrm{arcsinh}(K(x))$ relative to the dashed identity line $y = x$. Green circles (`7-pt FD`) lie directly on $y = x$; orange triangles (`1N k-NN Jet`) cluster tightly along the diagonal with mild smoothing from local neighborhood averaging over noisy training points.
 """,
         },
         {
@@ -2779,7 +3043,24 @@ plt.show()
             "source": r"""
 ## 2. Step-Level Compute, Memory & Autograd Graph Benchmark (vs. `SGD` Cross-Entropy Baseline)
 
-We benchmark a complete **forward + backward + `SGD.step()`** iteration across **14 configurations**, anchored by **`SGD + Cross-Entropy`** (`1st-Order` reference).
+### What This Experiment Does
+We profile a single complete training iteration—`sgd.zero_grad() -> loss_fn() -> loss.backward() -> sgd.step()`—across **14 configurations** spanning four groups:
+1. **`Baseline`**: Standard 1st-order `SGD + Cross-Entropy` (`1N` forward batch).
+2. **`Volume` (`volume_contrastive_loss`)**: Exact 2nd-order autodiff vs. `App 1` (`3-pt FD`), `App 2` (`1N k-NN Linear`), and `App 3` (`2-Probe Sketch`).
+3. **`Anisotropy` (`anisotropy_margin_loss`)**: Exact 2nd-order autodiff vs. `App 1` (`3-pt FD`), `App 2` (`1N k-NN Linear`), and `App 3` (`1-Probe Hutchinson`).
+4. **`Curvature` (`curvature_margin_loss`)**: Exact 3rd-order Levi-Civita autodiff vs. `App 4` (`Exact Gauss Eq.`), `App 1` (`7-pt FD`), `App 2` (`1N k-NN Quad Jet`), and `App 3` (`Random 2-Plane`).
+
+All 14 rows use identical `torch.optim.SGD` parameter updates so every difference in latency, CPU tensor memory (`torch.profiler`), and autograd DAG size (`count_autograd_nodes`) comes purely from evaluating and backpropagating the loss.
+
+### How to Interpret the Table & Three-Panel Figure
+- **Benchmark Table Columns**:
+  - `Order`: Highest symbolic differentiation order traced by PyTorch autograd (`1st` for Cross-Entropy and Approaches 1–3; `2nd` for exact metric losses; `3rd` for exact curvature losses).
+  - `Evals`: Effective forward batch multiplier (`1N` for Cross-Entropy and `k-NN` jets; `2N`–`7N` for stencils/sketches; nested `jacrev` / `jacfwd` transforms for exact autodiff).
+  - `Latency (ms)` & `Speedup`: Wall-clock milliseconds per step and relative speedup **within that geometric loss family** against its own exact autodiff baseline (`1.0x`).
+  - `Memory (MB)` & `Mem Save`: Total CPU tensor memory allocated during forward + backward and the memory reduction factor relative to that group's exact autodiff baseline.
+  - `Nodes`: Number of backward `grad_fn` nodes in PyTorch's autograd graph—explaining *why* 1st-order methods shrink memory and overhead dramatically (hundreds/thousands of higher-order graph nodes collapse down toward the compact DAG of standard backprop).
+- **Left & Middle Bar Charts (`Compute Cost` & `Memory Footprint`)**: Horizontal log-scale bars comparing representative methods from `SGD + CE` (black, top) down through exact and approximated Volume and Curvature losses. Shorter bars (further left) are faster / lighter.
+- **Right Scatter Plot (`Compute–Memory Pareto Frontier`)**: Plots `Latency` (x-axis) vs. `Memory` (y-axis) on log–log scales. The **bottom-left corner** is optimal (matching `SGD + Cross-Entropy`, black star `*`). Diamonds (`D`) denote higher-order symbolic autodiff (`2nd`/`3rd` order), circles (`o`) denote 1st-order approximations, and marker area scales with autograd `Nodes`—visualizing how Approaches 1–3 jump orders of magnitude down and left toward the `SGD + CE` frontier.
 """,
         },
         {
@@ -2952,7 +3233,20 @@ plt.show()
             "source": r"""
 ## 3. End-to-End `SGD` Training Convergence & Exact Analytical Test Accuracy
 
-Below we train **every method using `torch.optim.SGD` (`momentum = 0.9`)** from the same initialization (`seed = 7`) alongside the **`SGD + Cross-Entropy` baseline**, and evaluate held-out test accuracy at every checkpoint using the **exact analytical differential-geometric operators**.
+### What This Experiment Does
+Step speedups only matter if the approximated gradients still **train the network to high classification accuracy**. Here we train fresh, identically initialized MLPs (`seed = 7`) for `N_EPOCHS = 120` epochs using `torch.optim.SGD(..., momentum=0.9)` and gradient clipping across all three geometric tasks (`Volume-Element`, `Metric Anisotropy`, `Gaussian Curvature`) and all approximation modes, alongside the `SGD + Cross-Entropy` baseline.
+
+Crucially, we use a strict **train-approximate / evaluate-exact protocol**:
+- **During training**, forward and backward passes use only the chosen approximation (`App 1`, `App 2`, `App 3`, `App 4`, or `Exact`).
+- **At evaluation checkpoints** (`exact_test_accuracy`), held-out `X_test` points are classified using the **exact analytical `torch.func` differential-geometric operators** ($\log\sqrt{\det g_{\text{exact}}}$, $\log(\tilde{g}_{11,\text{exact}}/\tilde{g}_{22,\text{exact}})$, and $K_{\text{exact}}$)—verifying that the network genuinely sculpted the true continuous manifold geometry rather than overfitting discrete approximation artifacts.
+
+### How to Interpret the Table & $2 \times 3$ Convergence Grid
+- **Summary Table Columns**:
+  - `Train Time (ms)`: Total cumulative wall-clock time spent inside the 120 training steps (excluding test evaluation checkpoints).
+  - `vs SGD+CE Time`: Ratio of total training time to the `SGD + Cross-Entropy` baseline (`1.00x`). Values around `1.2x`–`3x` indicate near-first-order training cost, whereas `Exact 3rd-Order (Levi-Civita)` can exceed `30x`–`80x`.
+  - `Exact Analytical Test Acc`: Final held-out test accuracy (%) computed from the exact analytical geometric invariant on `X_test`.
+- **Top Row (`Accuracy vs. SGD Training Epoch`)**: Measures **per-step optimization fidelity**. When an approximation's curve tracks the dashed `Exact` curve closely step-for-step, its 1st-order gradient estimator is nearly unbiased/noiseless; mild lag in stochastic probes (`App 3`) or neighborhood regression (`App 2`) reflects probe variance or local smoothing bias.
+- **Bottom Row (`Accuracy vs. Cumulative Wall-Clock Training Time`, log scale)**: Measures **real-world compute efficiency**. Curves reaching the top-left earliest achieve high exact geometric test accuracy in minimal wall-clock time—showing that Approaches 1–3 converge nearly an order of magnitude faster in wall-clock time than exact 3rd-order curvature autodiff, closely approaching the `SGD + Cross-Entropy` dotted black curve.
 """,
         },
         {
@@ -3131,7 +3425,17 @@ plt.show()
             "source": r"""
 ## 4. Exact Analytical Decision Landscapes Learned via 1st-Order Approximations
 
-We evaluate the **exact analytical** log-volume field $\log\sqrt{\det g^{(L)}(x)}$ (Row 0) and **exact analytical** Gaussian curvature $\mathrm{arcsinh}(K^{(L)}(x))$ (Row 1) across the ambient 2D plane.
+### What This Experiment Does
+To inspect *how* each training approximation shapes the representation manifold across the entire 2D input domain $(x^1, x^2)$, we take the trained models from Section 3 and evaluate their **exact analytical** geometric scalar fields on a dense ambient grid (`grid_pts`):
+- **Row 0 (`Volume-Element` models)**: Plots exact analytical log-volume density $\log\sqrt{\det g^{(L)}(x)}$ comparing `Exact 2nd-Order Autodiff` (Col 0) against `App 1: 3-pt FD`, `App 2: 1N k-NN Linear`, and `App 3: Random 2-Probe` (Cols 1–3).
+- **Row 1 (`Gaussian Curvature` models)**: Plots exact analytical compressed Gaussian curvature $\mathrm{arcsinh}(K^{(L)}(x))$ comparing `App 4: Exact Gauss Eq.` (Col 0) against `App 1: 7-pt FD`, `App 2: 1N k-NN Quad Jet`, and `App 3: Random 2-Plane` (Cols 1–3).
+
+### How to Interpret the $2 \times 4$ Spatial Contour Maps
+- **Diverging Color Scale (`RdBu_r` centered at `0.0 = white`)**:
+  - **Blue regions ($< 0$)**: Locally contractive basins ($\det g < 1$ in Row 0) or negatively curved hyperbolic saddles ($K < 0$ in Row 1), targeted to Class `0` in binary classification.
+  - **Red regions ($> 0$)**: Locally expansive regions ($\det g > 1$ in Row 0) or positively curved elliptic domes ($K > 0$ in Row 1), targeted to Class `1`.
+- **Solid Black Contour (`level = 0.0`)**: The exact intrinsic geometric decision boundary ($\det g(x) = 1$ in Row 0; parabolic zero-curvature curve $K(x) = 0$ in Row 1) separating classes without consulting raw output coordinates.
+- **Panel Titles & Visual Comparison**: Compare Columns 1–3 against Column 0 (exact reference). Matching contour topology, smooth class-separating zero contours, and comparable `Exact Acc` achieved in a fraction of the training milliseconds (`ms`) demonstrate that 1st-order stencils, $k$-NN jets, and tangent sketches learn the **same qualitative Riemannian geometry** as higher-order symbolic autodiff.
 """,
         },
         {
@@ -3194,6 +3498,22 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 5. High-Dimensional Input Scaling ($d_0 = 2 \to 128$): Why Randomized Tangent Sketching Wins
+
+### What This Experiment Does
+On 2D toy inputs ($d_0 = 2$), full coordinate finite differences (`Approach 1`) only require $(d_0 + 1)N = 3N$ forward evaluations. However, on high-dimensional inputs, any method that differentiates or perturbs along **every** input axis suffers from the curse of dimensionality. Here we sweep input dimension $d_0 \in \{2, 4, 8, 16, 32, 64, 128\}$ on synthetic batches of size $N = 128$ with architecture `[d_0, 16, 16, C]`, benchmarking five methods via `benchmark_sgd_step`:
+1. **`SGD + Cross-Entropy`** (`1N` forward pass, 1st-order reference).
+2. **`Exact Metric Autodiff (2nd)`** (`jacrev` pullback of the full $d_0 \times d_0$ metric).
+3. **`App 1: Full Coord FD ((d0+1)N)`** (perturbs every coordinate axis $e_1, \dots, e_{d_0}$).
+4. **`App 3: 1-Probe Metric Sketch (2N)`** (estimates directional metric stretch along a single random unit tangent vector $u \sim \mathrm{Unif}(\mathbb{S}^{d_0-1})$).
+5. **`App 3: Random 2-Plane Curv. (7N)`** (evaluates sectional curvature along a random orthonormal 2-plane $Q \in \mathbb{R}^{d_0 \times 2}$ via the 7-point stencil).
+
+> **Why the y-axes report `ms / SGD step` and `MB / SGD step`**: All five curves—both `Cross-Entropy` and the four geometric loss variants—use **`torch.optim.SGD` as the parameter optimizer** inside `benchmark_sgd_step` (`sgd.zero_grad() -> loss_fn() -> backward() -> sgd.step()`). Holding the optimizer fixed to vanilla `SGD` eliminates confounding memory or compute overhead from Adam state buffers or $P \times P$ Natural Gradient solves (evaluated separately in Section 6), isolating purely how each loss operator scales with $d_0$.
+
+### How to Interpret the Table & Log–Log Scaling Plots
+- **Printed Table (`ms / MB` per cell)**: Each column reports `Latency (ms) / Memory (MB)` at input dimension `d_0`. Watch the middle two columns (`Exact 2nd` and `Coord FD`) balloon to tens/hundreds of megabytes by `d_0 = 128`, while `App3 2-Plane K (7N)` stays nearly constant across the entire column.
+- **Left Plot (`Compute Scaling vs. Ambient Input Dimension`) & Right Plot (`Memory Scaling vs. Ambient Input Dimension`)**:
+  - **Steeply rising curves (`Exact Metric Autodiff` red dashed, `Full Coord FD` blue dash-dot)**: Exhibit $O(d_0)$ to $O(d_0^2)$ batch/Jacobian growth as $d_0 \to 128$.
+  - **Nearly flat curves (`App 3: 1-Probe Sketch` green, `App 3: Random 2-Plane Curv.` purple)**: Maintain **$O(1)$ forward batch multiplicity (`2N` and `7N`)** with respect to $d_0$, tracking parallel to `SGD + Cross-Entropy` (black dotted) up to minor input-layer matrix-multiply growth ($d_0 \times 16$).
 """,
         },
         {
@@ -3299,6 +3619,24 @@ plt.show()
             "type": "markdown",
             "source": r"""
 ## 6. Matrix-Free Woodbury Coupled Natural Gradient (`O(S^2 P)` + 1st-Order Stencils)
+
+### What This Experiment Does
+Sections 1–5 eliminated higher-order **data-space** autodiff inside `loss.backward()` using first-order `SGD`. However, Notebook 06 showed that **Coupled Geometric Natural Gradient (`Coupled Geom-NGD`)** dramatically accelerates and stabilizes Gaussian curvature optimization—at the cost of forming and solving a dense $P \times P$ parameter metric $G^{\Theta,\text{coupled}}(\theta)$ ($O(P^2)$ memory and $O(P^3)$ Cholesky solve).
+
+In this final experiment, we eliminate **both** bottlenecks simultaneously via `woodbury_coupled_ngd_direction`, comparing three optimizers over `35` curvature-loss steps from identical initialization (`seed = 7`):
+1. **`Uncoupled SGD + 7-pt FD (1st)`**: Momentum `SGD` in flat Euclidean weight space using the 1st-order 7-point curvature stencil.
+2. **`Woodbury Coupled NGD (S=16, 7-pt FD)`**: Evaluates the 7-point FD stencil on a random subsample of $S = 16$ points to build a skinny low-rank Jacobian $U \in \mathbb{R}^{R \times P}$ ($R = 4S = 64 \ll P$, stacking 1 curvature residual + 3 independent whitened DeWitt metric components per sample) and computes the exact damped Natural Gradient step **matrix-free** via the Sherman–Morrison–Woodbury identity:
+   $$\left(\lambda I_P + \frac{1}{S} U^T U\right)^{-1} g = \frac{1}{\lambda}\left[g - U^T \left(\lambda S I_R + U U^T\right)^{-1} (U g)\right]$$
+   inverting only a tiny $64 \times 64$ matrix ($O(R^2 P + R^3)$ compute, zero $P \times P$ allocation).
+3. **`Dense Coupled NGD (Exact Gauss)`**: Full-batch exact Gauss-equation curvature + dense $P \times P$ `compute_coupled_geometric_metric` linear solve from Notebook 06.
+
+### How to Interpret the Printed Benchmark & Two-Panel Trajectory Plot
+- **Printed Summary Rows**:
+  - `ms/step` & `MB/step`: Total wall-clock step time and CPU tensor memory for the entire parameter update (loss forward/backward **plus** parameter metric preconditioning). Look for `Woodbury Coupled NGD` to cut step latency and memory substantially relative to `Dense Coupled NGD`, especially as parameter count $P$ grows.
+  - `Final Loss` & `Exact Test Acc`: Final curvature margin loss and held-out test accuracy evaluated via exact analytical curvature (`exact_test_accuracy`).
+- **Left Plot (`Curvature Loss: Matrix-Free Woodbury vs. Dense Coupled NGD`, log scale)** & **Right Plot (`Held-Out Curvature Test Accuracy Trajectory`)**:
+  - Compare `Woodbury Coupled NGD` (blue dashed) against `Uncoupled SGD + 7-pt FD` (gray dotted) and `Dense Coupled NGD` (green solid).
+  - `Woodbury Coupled NGD` captures the steep per-step loss descent and rapid test-accuracy climb of `Dense Coupled NGD` (far outpacing uncoupled `SGD` in 35 steps) while requiring only 1st-order spatial stencils and a $64 \times 64$ inner solve.
 """,
         },
         {
