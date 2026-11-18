@@ -73,10 +73,12 @@ diffgeom/
 │   ├── 02_layerwise_curvature_evolution.ipynb                # Christoffel symbols, Riemann curvature & 2D-to-2D flatness analysis
 │   ├── 03_parameter_data_manifold_duality.ipynb              # 422x422 Parameter FIM vs. 2x2 Data Information Matrix & Natural GD
 │   ├── 04_purely_geometric_curvature_losses.ipynb            # End-to-end 3rd-order autodiff training with K < 0 vs. K > 0
-│   └── 05_geometric_loss_ablations_and_synthesis.ipynb       # Comparison of curvature, volume & anisotropy losses + compute/memory costs
+│   ├── 05_geometric_loss_ablations_and_synthesis.ipynb       # Comparison of curvature, volume & anisotropy losses + compute/memory costs
+│   ├── 06-coupled-optimization.ipynb                         # Coupled parameter-data metric Natural GD vs. uncoupled baselines
+│   └── 07-evaluating-efficient-training.ipynb                # 1st-order efficient geometric approximations vs. SGD Cross-Entropy baseline
 ├── scripts/
 │   ├── nb_executor.py                                        # Headless notebook builder & executor with inline PNG capture
-│   └── build_all_notebooks.py                                # Rebuilds and executes all 5 notebooks end-to-end
+│   └── build_all_notebooks.py                                # Rebuilds and executes all 7 notebooks end-to-end
 └── assets/
     ├── decision_landscapes.png                               # 4-panel comparison of learned geometric decision boundaries
     ├── geometric_fields_matrix_3x4.png                       # 3x4 matrix of final-layer curvature, log volume & anisotropy across experiments
@@ -87,7 +89,7 @@ diffgeom/
 
 ## Reproducing the Notebooks
 
-All notebooks are pre-executed with embedded outputs and configured for the `lunarpoles` PyTorch kernel (`/opt/conda/envs/lunarpoles/bin/python`). To regenerate and execute all five notebooks from scratch:
+All notebooks are pre-executed with embedded outputs and configured for the `lunarpoles` PyTorch kernel (`/opt/conda/envs/lunarpoles/bin/python`). To regenerate and execute all seven notebooks from scratch:
 
 ```bash
 /opt/conda/envs/lunarpoles/bin/python scripts/build_all_notebooks.py

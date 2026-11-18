@@ -8,6 +8,7 @@ loss functions) using composable PyTorch automatic differentiation (torch.func).
 
 from __future__ import annotations
 
+import math
 from typing import Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
@@ -16,9 +17,10 @@ from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.func import functional_call, jacrev, vmap
+from torch.func import functional_call, jacfwd, jacrev, vmap
 
 MetricMode = Literal["euclidean", "graph", "conformal_gaussian"]
+GeometricTask = Literal["curvature", "volume", "anisotropy"]
 
 
 def get_moons_dataset(
@@ -524,3 +526,522 @@ def anisotropy_margin_loss(
         "mean_aniso_c0": log_ratio[y == 0].mean().item(),
         "mean_aniso_c1": log_ratio[y == 1].mean().item(),
     }
+
+
+def _sym2_inv_sqrt(g: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
+    """Compute the symmetric matrix inverse square root g^{-1/2} for (N, 2, 2) SPD tensors."""
+    evals, evecs = torch.linalg.eigh(g)
+    inv_sqrt_evals = torch.rsqrt(torch.clamp(evals, min=eps))
+    return torch.einsum("nij,nj,nkj->nik", evecs, inv_sqrt_evals, evecs)
+
+
+def compute_fast_graph_geometry(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    layer_idx: Optional[int] = None,
+    params: Optional[Dict[str, torch.Tensor]] = None,
+    eps: float = 1e-8,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute exact graph pullback metric g = I_2 + J^T J and Gaussian curvature K via Gauss's equation.
+
+    Uses 2nd-order forward-mode spatial derivatives jacfwd(jacfwd(phi)) rather than 3rd-order
+    reverse-mode metric derivatives, matching compute_layer_geometry(..., metric_mode='graph')
+    to float64 machine precision while accelerating parameter-space curvature Jacobians ~45x.
+    """
+    if layer_idx is None:
+        layer_idx = model.num_layers
+    phi_single = _make_single_point_layer_fn(model, layer_idx, params=params)
+    jac_fn = jacfwd(phi_single)
+    hess_fn = jacfwd(jac_fn)
+
+    def single_geom(x_single: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        J = jac_fn(x_single)  # (d_l, 2)
+        H = hess_fn(x_single)  # (d_l, 2, 2)
+        eye2 = torch.eye(2, dtype=x_single.dtype, device=x_single.device)
+        g = eye2 + J.T @ J
+
+        det_g = g[0, 0] * g[1, 1] - g[0, 1] * g[1, 0]
+        det_g_safe = torch.where(
+            torch.abs(det_g) < eps,
+            torch.sign(det_g + 1e-15) * eps,
+            det_g,
+        )
+        g_inv = torch.stack(
+            [
+                torch.stack([g[1, 1], -g[0, 1]]),
+                torch.stack([-g[1, 0], g[0, 0]]),
+            ]
+        ) / det_g_safe
+
+        gamma_11 = J.T @ H[:, 0, 0]
+        gamma_22 = J.T @ H[:, 1, 1]
+        gamma_12 = J.T @ H[:, 0, 1]
+
+        r_extrinsic = torch.dot(H[:, 0, 0], H[:, 1, 1]) - torch.dot(H[:, 0, 1], H[:, 0, 1])
+        r_connection = torch.dot(gamma_12, g_inv @ gamma_12) - torch.dot(gamma_11, g_inv @ gamma_22)
+        K = (r_extrinsic + r_connection) / det_g_safe
+        return g, K
+
+    return vmap(single_geom)(X)
+
+
+def compute_uncoupled_coord_metric(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    damping: float = 1e-2,
+) -> torch.Tensor:
+    """Compute the uncoupled P x P output-coordinate pullback metric E_x[(J_theta z)^T (J_theta z)] + damping * I."""
+    params = {k: v.detach() for k, v in model.named_parameters()}
+    buffers = dict(model.named_buffers())
+    param_keys = list(params.keys())
+    N = X.shape[0]
+
+    def z_flat(p_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+        return functional_call(model, (p_dict, buffers), (X,)).reshape(-1)
+
+    J_dict = jacfwd(z_flat)(params)
+    J_flat = torch.cat([J_dict[k].reshape(2 * N, -1) for k in param_keys], dim=-1)
+    P = J_flat.shape[1]
+    return (J_flat.T @ J_flat) / float(N) + damping * torch.eye(P, dtype=X.dtype, device=X.device)
+
+
+def compute_coupled_dewitt_metric(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    metric_mode: MetricMode = "graph",
+    eps: float = 1e-6,
+    inv_eps: float = 1e-3,
+    volume_weighted: bool = False,
+    damping: float = 1e-2,
+) -> torch.Tensor:
+    """Compute the P x P affine-invariant DeWitt / Ebin parameter metric coupled to data-space metric g(x; theta).
+
+    Pulls back the canonical Riemannian metric on Sym^+_2:
+        G^{Theta,DeWitt}_{mu,nu}(theta) = E_x[ w(x) Tr( g(x)^{-1} d_mu g(x) g(x)^{-1} d_nu g(x) ) ] + damping * I
+    Automatically quotients out rigid output motions z -> Q z + b (E(2) = O(2) x R^2).
+    """
+    params = {k: v.detach() for k, v in model.named_parameters()}
+    param_keys = list(params.keys())
+    N = X.shape[0]
+
+    with torch.no_grad():
+        g0 = compute_layer_pullback_metric(
+            model, X, layer_idx=model.num_layers, metric_mode=metric_mode, eps=eps, params=params
+        )
+        g0_inv_sqrt = _sym2_inv_sqrt(g0, eps=inv_eps)
+        if volume_weighted:
+            vol = torch.sqrt(torch.clamp(torch.linalg.det(g0), min=1e-12))
+            w_vol = torch.sqrt(vol / vol.mean())
+        else:
+            w_vol = torch.ones(N, dtype=X.dtype, device=X.device)
+
+    def whitened_metric_flat(p_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+        g = compute_layer_pullback_metric(
+            model, X, layer_idx=model.num_layers, metric_mode=metric_mode, eps=eps, params=p_dict
+        )
+        M = torch.einsum("nij,njk,nkl->nil", g0_inv_sqrt, g, g0_inv_sqrt) * w_vol[:, None, None]
+        return M.reshape(-1)
+
+    J_dict = jacfwd(whitened_metric_flat)(params)
+    J_flat = torch.cat([J_dict[k].reshape(4 * N, -1) for k in param_keys], dim=-1)
+    P = J_flat.shape[1]
+    return (J_flat.T @ J_flat) / float(N) + damping * torch.eye(P, dtype=X.dtype, device=X.device)
+
+
+def compute_coupled_geometric_metric(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    y: torch.Tensor,
+    task: GeometricTask,
+    margin: float = 0.5,
+    beta_hinge: float = 4.0,
+    dewitt_weight: float = 0.20,
+    inv_eps: float = 1e-3,
+    k_clip: float = 10.0,
+    lambda_vol: Optional[float] = None,
+    lambda_iso: float = 0.005,
+    damping: float = 2e-2,
+) -> torch.Tensor:
+    """Compute the task-coupled P x P parameter metric induced by data-space geometry and target invariant.
+
+    Combines the affine-invariant DeWitt metric pullback on Met(M) with the Generalized Gauss-Newton
+    pullback of the target geometric field psi(x; theta) in {K, log sqrt(det g), log(g_11 / g_22)}.
+    """
+    params = {k: v.detach() for k, v in model.named_parameters()}
+    param_keys = list(params.keys())
+    N = X.shape[0]
+    signs = 2.0 * y.to(X.dtype) - 1.0
+
+    if lambda_vol is None:
+        lambda_vol = {"curvature": 0.02, "volume": 0.02, "anisotropy": 0.05}[task]
+
+    def eval_geom_components(
+        p_dict: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if task == "curvature":
+            g, K = compute_fast_graph_geometry(model, X, params=p_dict)
+            psi = k_clip * torch.tanh(K / k_clip)
+            det_g = torch.clamp(torch.linalg.det(g), min=1e-8)
+            r_vol = math.sqrt(2.0 * lambda_vol) * torch.log(det_g).unsqueeze(-1)
+            eye2 = torch.eye(2, dtype=X.dtype, device=X.device).unsqueeze(0)
+            r_iso = math.sqrt(2.0 * lambda_iso) * (g - eye2).reshape(N, 4)
+            return psi, g, torch.cat([r_vol, r_iso], dim=-1)
+        if task == "volume":
+            g = compute_layer_pullback_metric(
+                model, X, layer_idx=model.num_layers, metric_mode="euclidean", eps=1e-6, params=p_dict
+            )
+            psi = 0.5 * torch.log(torch.clamp(torch.linalg.det(g), min=1e-8))
+            r_reg = math.sqrt(2.0 * lambda_vol) * psi.unsqueeze(-1)
+            return psi, g, r_reg
+        if task == "anisotropy":
+            g = compute_layer_pullback_metric(
+                model, X, layer_idx=model.num_layers, metric_mode="graph", params=p_dict
+            )
+            psi = torch.log(torch.clamp(g[:, 0, 0], min=1e-8) / torch.clamp(g[:, 1, 1], min=1e-8))
+            det_g = torch.clamp(torch.linalg.det(g), min=1e-8)
+            r_reg = math.sqrt(2.0 * lambda_vol) * torch.log(det_g).unsqueeze(-1)
+            return psi, g, r_reg
+        raise ValueError(f"Unsupported geometric task: {task}")
+
+    with torch.no_grad():
+        psi0, g0, _ = eval_geom_components(params)
+        sig0 = torch.sigmoid(beta_hinge * (margin - signs * psi0))
+        w_psi = torch.sqrt(beta_hinge * sig0 * (1.0 - sig0) + 0.10)
+        g0_inv_sqrt = _sym2_inv_sqrt(g0, eps=inv_eps)
+        w_dw = math.sqrt(dewitt_weight)
+
+    def coupled_feature_vector(p_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+        psi, g, extra_reg = eval_geom_components(p_dict)
+        f_psi = (psi * w_psi).unsqueeze(-1)
+        M = torch.einsum("nij,njk,nkl->nil", g0_inv_sqrt, g, g0_inv_sqrt) * w_dw
+        return torch.cat([f_psi, M.reshape(N, 4), extra_reg], dim=-1).reshape(-1)
+
+    J_dict = jacfwd(coupled_feature_vector)(params)
+    J_flat = torch.cat([J_dict[k].reshape(-1, params[k].numel()) for k in param_keys], dim=-1)
+    P = J_flat.shape[1]
+    return (J_flat.T @ J_flat) / float(N) + damping * torch.eye(P, dtype=X.dtype, device=X.device)
+
+
+# =============================================================================
+# First-Order Efficient Approximations for Spatial & Coupled Geometric Training
+# =============================================================================
+
+
+def _eval_model_batch(
+    model: MoonsMLP,
+    X_batch: torch.Tensor,
+    params: Optional[Dict[str, torch.Tensor]] = None,
+) -> torch.Tensor:
+    if params is None:
+        return model(X_batch)
+    buffers = dict(model.named_buffers())
+    return functional_call(model, (params, buffers), (X_batch,))
+
+
+def compute_fd_pullback_metric(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    h: float = 1e-3,
+    metric_mode: MetricMode = "euclidean",
+    eps: float = 1e-6,
+    params: Optional[Dict[str, torch.Tensor]] = None,
+) -> torch.Tensor:
+    """Compute d_0 x d_0 pullback metric via a single batched forward-difference pass ((d_0 + 1)*N).
+
+    Eliminates symbolic spatial autodiff (jacrev/jacfwd) so loss.backward() wrt theta is purely 1st-order.
+    """
+    N, d0 = X.shape
+    basis = torch.eye(d0, dtype=X.dtype, device=X.device) * h
+    X_shifted = (X[:, None, :] + basis[None, :, :]).reshape(N * d0, d0)
+    Z_all = _eval_model_batch(model, torch.cat([X, X_shifted], dim=0), params=params)
+    z0 = Z_all[:N]
+    z_shift = Z_all[N:].reshape(N, d0, -1)
+    J = ((z_shift - z0[:, None, :]) / h).transpose(-1, -2)  # (N, d_out, d0)
+    jtj = torch.einsum("nai,naj->nij", J, J)
+    eye = torch.eye(d0, dtype=X.dtype, device=X.device).unsqueeze(0)
+    if metric_mode == "graph":
+        return eye + jtj
+    if metric_mode == "euclidean":
+        return jtj + eps * eye
+    raise ValueError(f"Unsupported metric_mode for FD stencil: {metric_mode}")
+
+
+def _plane_7pt_curvature(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    v1: torch.Tensor,
+    v2: torch.Tensor,
+    h: float = 2e-3,
+    eps: float = 1e-8,
+    params: Optional[Dict[str, torch.Tensor]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Evaluate 2D graph metric and Gaussian curvature on a 2-plane spanned by orthonormal (v1, v2) via 7-pt FD."""
+    N = X.shape[0]
+    s1 = h * v1
+    s2 = h * v2
+    s12 = s1 + s2
+    X_all = torch.cat([X, X + s1, X - s1, X + s2, X - s2, X + s12, X - s12], dim=0)
+    Z_all = _eval_model_batch(model, X_all, params=params).reshape(7, N, -1)
+    z0, zp1, zm1, zp2, zm2, zp12, zm12 = (
+        Z_all[0],
+        Z_all[1],
+        Z_all[2],
+        Z_all[3],
+        Z_all[4],
+        Z_all[5],
+        Z_all[6],
+    )
+
+    d1 = (zp1 - zm1) / (2.0 * h)
+    d2 = (zp2 - zm2) / (2.0 * h)
+    h11 = (zp1 - 2.0 * z0 + zm1) / (h * h)
+    h22 = (zp2 - 2.0 * z0 + zm2) / (h * h)
+    h12 = (zp12 - zp1 - zp2 + 2.0 * z0 - zm1 - zm2 + zm12) / (2.0 * h * h)
+
+    J = torch.stack([d1, d2], dim=-1)  # (N, d_out, 2)
+    eye2 = torch.eye(2, dtype=X.dtype, device=X.device).unsqueeze(0)
+    g = eye2 + torch.einsum("nai,naj->nij", J, J)
+
+    det_g = torch.clamp(g[:, 0, 0] * g[:, 1, 1] - g[:, 0, 1] * g[:, 1, 0], min=eps)
+    g_inv = (
+        torch.stack(
+            [
+                torch.stack([g[:, 1, 1], -g[:, 0, 1]], dim=-1),
+                torch.stack([-g[:, 1, 0], g[:, 0, 0]], dim=-1),
+            ],
+            dim=-2,
+        )
+        / det_g[:, None, None]
+    )
+
+    gamma_11 = torch.einsum("nai,na->ni", J, h11)
+    gamma_22 = torch.einsum("nai,na->ni", J, h22)
+    gamma_12 = torch.einsum("nai,na->ni", J, h12)
+
+    r_ext = (h11 * h22).sum(-1) - (h12 * h12).sum(-1)
+    r_conn = torch.einsum("ni,nij,nj->n", gamma_12, g_inv, gamma_12) - torch.einsum(
+        "ni,nij,nj->n", gamma_11, g_inv, gamma_22
+    )
+    K = (r_ext + r_conn) / det_g
+    return g, K
+
+
+def compute_fd_graph_curvature(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    h: float = 2e-3,
+    eps: float = 1e-8,
+    params: Optional[Dict[str, torch.Tensor]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute 2D graph metric and Gaussian curvature K via a 7-point central stencil (pure 1st-order autodiff)."""
+    if X.shape[1] != 2:
+        raise ValueError(f"Coordinate 7-pt curvature stencil expects 2D inputs, got d_0={X.shape[1]}")
+    e1 = torch.tensor([1.0, 0.0], dtype=X.dtype, device=X.device)
+    e2 = torch.tensor([0.0, 1.0], dtype=X.dtype, device=X.device)
+    return _plane_7pt_curvature(model, X, e1, e2, h=h, eps=eps, params=params)
+
+
+def build_knn_jet_operator(
+    X: torch.Tensor,
+    k_neighbors: int = 14,
+    order: Literal[1, 2] = 2,
+    ridge: float = 1e-4,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Precompute Gaussian-weighted local Taylor least-squares operators on a point cloud X (once at t = 0).
+
+    - order = 1: returns (knn_idx, lin_op) of shape ((N, k), (N, d_0, k)) for 1st-order Jacobians.
+    - order = 2: (for d_0 = 2) returns (knn_idx, jet_op) of shape ((N, k), (N, 5, k)) for
+      [d_1, d_2, d_11, d_12, d_22].
+    """
+    dist_sq = torch.cdist(X, X) ** 2
+    _, knn_idx = torch.topk(dist_sq, k=k_neighbors + 1, largest=False, dim=-1)
+    knn_idx = knn_idx[:, 1:]  # (N, k)
+    dX = X[knn_idx] - X[:, None, :]  # (N, k, d0)
+
+    sigma2 = dX.pow(2).sum(-1).median(dim=-1, keepdim=True).values + 1e-6
+    w = torch.exp(-dX.pow(2).sum(-1) / (2.0 * sigma2))  # (N, k)
+
+    if order == 1:
+        Phi = dX  # (N, k, d0)
+    elif order == 2:
+        if X.shape[1] != 2:
+            raise ValueError("Quadratic order=2 jet operator expects 2D inputs.")
+        dx1, dx2 = dX[:, :, 0], dX[:, :, 1]
+        Phi = torch.stack([dx1, dx2, 0.5 * dx1**2, dx1 * dx2, 0.5 * dx2**2], dim=-1)  # (N, k, 5)
+    else:
+        raise ValueError(f"order must be 1 or 2, got {order}")
+
+    m_dim = Phi.shape[-1]
+    W_Phi = Phi * w.unsqueeze(-1)
+    gram = torch.einsum("nka,nkb->nab", Phi, W_Phi) + ridge * torch.eye(
+        m_dim, dtype=X.dtype, device=X.device
+    ).unsqueeze(0)
+    jet_op = torch.linalg.solve(gram, W_Phi.transpose(-1, -2))  # (N, m_dim, k)
+    return knn_idx, jet_op
+
+
+def compute_knn_jet_geometry(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    knn_idx: torch.Tensor,
+    jet_op: torch.Tensor,
+    metric_mode: MetricMode = "graph",
+    eps: float = 1e-6,
+    params: Optional[Dict[str, torch.Tensor]] = None,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Compute pullback metric g (and Gaussian curvature K if jet_op is order 2) from a SINGLE 1N forward pass."""
+    Z = _eval_model_batch(model, X, params=params)  # (N, d_out) - exact 1N batch size!
+    dZ = Z[knn_idx] - Z[:, None, :]  # (N, k, d_out)
+    jets = torch.einsum("nmk,nka->nma", jet_op, dZ)  # (N, m_dim, d_out)
+
+    d0 = X.shape[1]
+    eye = torch.eye(d0, dtype=X.dtype, device=X.device).unsqueeze(0)
+
+    if jet_op.shape[1] == d0:
+        # Order-1 linear Jacobian operator: jets has shape (N, d0, d_out)
+        J = jets.transpose(-1, -2)  # (N, d_out, d0)
+        jtj = torch.einsum("nai,naj->nij", J, J)
+        g = (eye + jtj) if metric_mode == "graph" else (jtj + eps * eye)
+        return g, None
+
+    # Order-2 quadratic 2D jet: [d1, d2, h11, h12, h22]
+    d1, d2, h11, h12, h22 = jets[:, 0], jets[:, 1], jets[:, 2], jets[:, 3], jets[:, 4]
+    J = torch.stack([d1, d2], dim=-1)  # (N, d_out, 2)
+    jtj = torch.einsum("nai,naj->nij", J, J)
+    g = (eye + jtj) if metric_mode == "graph" else (jtj + eps * eye)
+
+    det_g = torch.clamp(g[:, 0, 0] * g[:, 1, 1] - g[:, 0, 1] * g[:, 1, 0], min=1e-8)
+    g_inv = (
+        torch.stack(
+            [
+                torch.stack([g[:, 1, 1], -g[:, 0, 1]], dim=-1),
+                torch.stack([-g[:, 1, 0], g[:, 0, 0]], dim=-1),
+            ],
+            dim=-2,
+        )
+        / det_g[:, None, None]
+    )
+
+    gamma_11 = torch.einsum("nai,na->ni", J, h11)
+    gamma_22 = torch.einsum("nai,na->ni", J, h22)
+    gamma_12 = torch.einsum("nai,na->ni", J, h12)
+
+    r_ext = (h11 * h22).sum(-1) - (h12 * h12).sum(-1)
+    r_conn = torch.einsum("ni,nij,nj->n", gamma_12, g_inv, gamma_12) - torch.einsum(
+        "ni,nij,nj->n", gamma_11, g_inv, gamma_22
+    )
+    K = (r_ext + r_conn) / det_g
+    return g, K
+
+
+def compute_sketched_pullback_metric(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    n_probes: int = 1,
+    h: float = 1e-3,
+    metric_mode: MetricMode = "euclidean",
+    eps: float = 1e-6,
+    generator: Optional[torch.Generator] = None,
+    params: Optional[Dict[str, torch.Tensor]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Estimate pullback metric via m random orthonormal directional probes ((m + 1)*N forward evaluations).
+
+    Returns (g_ambient_est, g_subspace), keeping compute O(m) independent of ambient input dimension d_0.
+    """
+    N, d0 = X.shape
+    raw = torch.randn(d0, n_probes, generator=generator, dtype=X.dtype, device=X.device)
+    Q, _ = torch.linalg.qr(raw)  # (d0, n_probes)
+    X_shifts = (X[:, None, :] + h * Q.T[None, :, :]).reshape(N * n_probes, d0)
+    Z_all = _eval_model_batch(model, torch.cat([X, X_shifts], dim=0), params=params)
+    z0 = Z_all[:N]
+    dz = (Z_all[N:].reshape(N, n_probes, -1) - z0[:, None, :]) / h  # (N, n_probes, d_out)
+
+    g_sub = torch.einsum("npa,nqa->npq", dz, dz)  # (N, n_probes, n_probes)
+    g_est = (float(d0) / float(n_probes)) * torch.einsum("ip,npq,jq->nij", Q, g_sub, Q)
+    eye = torch.eye(d0, dtype=X.dtype, device=X.device).unsqueeze(0)
+    g_out = (eye + g_est) if metric_mode == "graph" else (g_est + eps * eye)
+    return g_out, g_sub
+
+
+def compute_sketched_plane_curvature(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    h: float = 2e-3,
+    eps: float = 1e-8,
+    generator: Optional[torch.Generator] = None,
+    params: Optional[Dict[str, torch.Tensor]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Estimate 2-plane sectional/Gaussian curvature along a random orthonormal 2-frame in R^{d_0} (7N evals, O(1) in d_0)."""
+    d0 = X.shape[1]
+    raw = torch.randn(d0, 2, generator=generator, dtype=X.dtype, device=X.device)
+    Q, _ = torch.linalg.qr(raw)
+    return _plane_7pt_curvature(model, X, Q[:, 0], Q[:, 1], h=h, eps=eps, params=params)
+
+
+def woodbury_coupled_ngd_direction(
+    model: MoonsMLP,
+    X_sub: torch.Tensor,
+    y_sub: torch.Tensor,
+    grad_flat: torch.Tensor,
+    task: GeometricTask = "curvature",
+    margin: float = 0.40,
+    beta_hinge: float = 4.0,
+    dewitt_weight: float = 0.20,
+    damping: float = 3e-2,
+) -> Tuple[torch.Tensor, float]:
+    """Matrix-free O(R^2 P) Woodbury Natural Gradient direction using 1st-order FD stencils on a subsample X_sub.
+
+    Avoids ever allocating a P x P parameter metric matrix by solving an R x R system (R << P) via:
+        (damping * I_P + (1/S) U^T U)^{-1} g = (1/damping) * [g - U^T (damping * S * I_R + U U^T)^{-1} (U g)]
+    Returns (nat_dir, riem_norm).
+    """
+    params = {k: v.detach() for k, v in model.named_parameters()}
+    param_keys = list(params.keys())
+    S = X_sub.shape[0]
+    signs = 2.0 * y_sub.to(X_sub.dtype) - 1.0
+
+    def fd_sub_terms(p_dict: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        if task == "curvature":
+            g, K = compute_fd_graph_curvature(model, X_sub, params=p_dict)
+            psi = 10.0 * torch.tanh(K / 10.0)
+            return psi, g
+        if task == "volume":
+            g = compute_fd_pullback_metric(model, X_sub, metric_mode="euclidean", params=p_dict)
+            psi = 0.5 * torch.log(torch.clamp(torch.linalg.det(g), min=1e-8))
+            return psi, g
+        if task == "anisotropy":
+            g = compute_fd_pullback_metric(model, X_sub, metric_mode="graph", params=p_dict)
+            psi = torch.log(torch.clamp(g[:, 0, 0], min=1e-8) / torch.clamp(g[:, 1, 1], min=1e-8))
+            return psi, g
+        raise ValueError(task)
+
+    with torch.no_grad():
+        psi0, g0 = fd_sub_terms(params)
+        sig0 = torch.sigmoid(beta_hinge * (margin - signs * psi0))
+        w_psi = torch.sqrt(beta_hinge * sig0 * (1.0 - sig0) + 0.10)
+        g0_inv_sqrt = _sym2_inv_sqrt(g0, eps=1e-3)
+        w_dw = math.sqrt(dewitt_weight)
+
+    def sketch_features(p_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+        psi, g = fd_sub_terms(p_dict)
+        f_psi = (psi * w_psi).unsqueeze(-1)  # (S, 1)
+        M = torch.einsum("nij,njk,nkl->nil", g0_inv_sqrt, g, g0_inv_sqrt) * w_dw
+        # Symmetric 2x2 has 3 independent components: M_00, sqrt(2)*M_01, M_11
+        f_dw = torch.stack([M[:, 0, 0], math.sqrt(2.0) * M[:, 0, 1], M[:, 1, 1]], dim=-1)  # (S, 3)
+        return torch.cat([f_psi, f_dw], dim=-1).reshape(-1)  # (4*S,)
+
+    J_dict = jacfwd(sketch_features)(params)
+    U = torch.cat([J_dict[k].reshape(-1, params[k].numel()) for k in param_keys], dim=-1)  # (R, P), R = 4*S
+    R_dim = U.shape[0]
+
+    # Woodbury solve: O(R^2 P + R^3) with zero P x P matrix allocation
+    Ug = U @ grad_flat  # (R,)
+    inner = (damping * float(S)) * torch.eye(R_dim, dtype=X_sub.dtype, device=X_sub.device) + (U @ U.T)
+    v = torch.linalg.solve(inner, Ug)
+    nat_dir = (grad_flat - U.T @ v) / damping
+
+    # Riemannian norm sqrt(nat_dir^T G nat_dir) computed matrix-free:
+    U_nd = U @ nat_dir
+    quad = damping * (nat_dir @ nat_dir) + (U_nd @ U_nd) / float(S)
+    riem_norm = torch.sqrt(torch.clamp(quad, min=1e-12)).item()
+    return nat_dir, riem_norm

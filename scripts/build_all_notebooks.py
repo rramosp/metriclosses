@@ -1752,9 +1752,1441 @@ plt.show()
     build_and_execute_notebook(ROOT / "notebooks" / "05_geometric_loss_ablations_and_synthesis.ipynb", cells)
 
 
+def build_notebook_06() -> None:
+    cells = [
+        {
+            "type": "markdown",
+            "source": r"""
+# Notebook 06: Coupled Parameter–Data Manifold Optimization Across Purely Geometric Losses
+
+## Research Objective
+When a neural network is trained using **purely differential-geometric losses** on its representation manifold—such as **Gaussian curvature** $K^{(5)}(x; \theta)$, **Riemannian log-volume density** $\log\sqrt{\det g^{(5)}(x; \theta)}$, or **directional metric anisotropy** $\log(\tilde{g}^{(5)}_{11}(x; \theta) / \tilde{g}^{(5)}_{22}(x; \theta))$—a parameter vector $\theta \in \Theta \subset \mathbb{R}^{422}$ does not parameterize a probability distribution $p_\theta(y \mid x)$. Instead, $\theta$ parameterizes an **immersed Riemannian metric field** on the data manifold:
+$$\mathcal{G} : \Theta \longrightarrow \mathrm{Met}(\mathcal{M}_0), \qquad \theta \longmapsto g(\cdot\,; \theta)$$
+
+Consequently, the Riemannian metric on parameter space $\Theta$ should **depend directly on the induced geometry of the data space**, rather than treating weights as flat Euclidean coordinates ($I_P$) or pulling back flat output coordinates ($G^{\Theta,\text{coord}} = \mathbb{E}_x[J_\theta^T J_\theta]$).
+
+### Four Parameter-Space Regimes Compared
+1. **Uncoupled Euclidean Gradient Descent ($G^\Theta = I_P$)**: Standard steepest descent $\Delta\theta = -\eta \nabla_\theta \mathcal{L}_{\text{geom}}$ in flat weight coordinates, ignoring both parameter and data manifold geometry.
+2. **Uncoupled Adam (Diagonal Coordinate Preconditioning)**: Empirical per-weight second-moment scaling in $\mathbb{R}^{422}$ (the uncoupled baseline used in Notebooks 04 and 05).
+3. **Uncoupled Output-Coordinate Pullback NGD ($G^{\Theta,\text{coord}}$)**: Pulls back the flat Euclidean identity $h^{\text{out}} = I_2$ on raw outputs $z(x; \theta) \in \mathbb{R}^2$:
+   $$G^{\Theta,\text{coord}}_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\!\left[ \sum_{a=1}^2 \frac{\partial z^a(x; \theta)}{\partial \theta^\mu} \frac{\partial z^a(x; \theta)}{\partial \theta^\nu} \right] + \lambda I_P$$
+   Because $G^{\Theta,\text{coord}}$ ignores $g(x; \theta)$, it fails to quotient out rigid Euclidean motions of the output space $z \mapsto Qz + b$ ($E(2) = O(2) \ltimes \mathbb{R}^2$).
+4. **Coupled Data-Geometry Pullback NGD ($G^{\Theta,\text{DeWitt}}$ & $G^{\Theta,\text{coupled}}$)**: Pulls back the **affine-invariant DeWitt / Ebin metric** on $2 \times 2$ SPD metric tensors $\mathrm{Sym}^+_2$ alongside the Generalized Gauss-Newton (GGN) metric of the target geometric scalar field $\psi(x; \theta) \in \{K^{(5)}, \log\sqrt{\det g^{(5)}}, \log(\tilde{g}^{(5)}_{11}/\tilde{g}^{(5)}_{22})\}$:
+   $$G^{\Theta,\text{DeWitt}}_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\!\left[ g^{ik}(x; \theta)\, g^{jl}(x; \theta)\, \frac{\partial g_{ij}(x; \theta)}{\partial \theta^\mu} \frac{\partial g_{kl}(x; \theta)}{\partial \theta^\nu} \right]$$
+   $$G^{\Theta,\text{coupled}}_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\!\left[ w_\psi(x; \theta) \frac{\partial \psi(x; \theta)}{\partial \theta^\mu} \frac{\partial \psi(x; \theta)}{\partial \theta^\nu} \right] + \gamma\, G^{\Theta,\text{DeWitt}}_{\mu\nu}(\theta) + G^{\Theta,\text{reg}}_{\mu\nu}(\theta) + \lambda I_P$$
+   with Riemannian geodesic trust-region updates $\Delta\theta = -\eta\, (G^{\Theta,\text{coupled}}(\theta))^{-1} \nabla_\theta \mathcal{L}_{\text{geom}}(\theta)$ subject to $\|\Delta\theta\|_{G^\Theta} \le r_{\max}$.
+""",
+        },
+        {
+            "type": "code",
+            "source": """
+import sys
+from pathlib import Path
+for p in [Path.cwd(), Path.cwd().parent]:
+    if (p / "src" / "geometry.py").exists() and str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+import copy
+import time
+import numpy as np
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+from matplotlib.colors import TwoSlopeNorm
+
+from src.geometry import (
+    MoonsMLP,
+    get_moons_dataset,
+    make_evaluation_grid,
+    compute_layer_geometry,
+    compute_layer_pullback_metric,
+    compute_fast_graph_geometry,
+    compute_uncoupled_coord_metric,
+    compute_coupled_dewitt_metric,
+    compute_coupled_geometric_metric,
+    curvature_margin_loss,
+    volume_contrastive_loss,
+    anisotropy_margin_loss,
+)
+
+plt.rcParams["figure.dpi"] = 120
+plt.rcParams["font.size"] = 10
+
+X_train, y_train, X_test, y_test = get_moons_dataset(n_train=220, n_test=120, noise=0.10, seed=42)
+xx, yy, grid_pts = make_evaluation_grid(X_train, n_grid=28, padding=0.45)
+print(f"Dataset loaded | Train: {X_train.shape}, Test: {X_test.shape}, Grid: {grid_pts.shape}")
+""",
+        },
+        {
+            "type": "markdown",
+            "source": r"""
+## 1. Exact $E(2)$ Output Symmetry Quotienting & Spectral Structure on $\Theta$
+
+All three geometric objectives depend exclusively on $J_x(x)^T J_x(x)$ (or $I_2 + J_x(x)^T J_x(x)$), which is **strictly invariant under the 3-dimensional Euclidean group $E(2) = O(2) \ltimes \mathbb{R}^2$ acting on output coordinates** $z \mapsto Qz + b$:
+- **2 Output Translations**: Shifting the final bias $b^{(5)} \mapsto b^{(5)} + \delta b$.
+- **1 Output Rotation ($\mathfrak{so}(2)$)**: Rotating the final layer $(W^{(5)}, b^{(5)}) \mapsto (e^{\epsilon \Omega} W^{(5)}, e^{\epsilon \Omega} b^{(5)})$ with $\Omega = \begin{pmatrix} 0 & -1 \\ 1 & 0 \end{pmatrix}$.
+
+Below we first verify that `compute_fast_graph_geometry` (using 2nd-order `jacfwd` + Gauss's equation $R_{1212} = \langle \mathrm{II}_{11}, \mathrm{II}_{22}\rangle - \|\mathrm{II}_{12}\|^2$) matches the 3rd-order Levi-Civita operator `compute_layer_geometry` to `float64` machine precision ($\sim 10^{-15}$). We then evaluate the undamped quadratic form $v^T G^\Theta v$ along all three $E(2)$ symmetry generators: uncoupled parameter metrics assign $\mathcal{O}(1)$ positive length to pure gauge motions, whereas coupled metrics ($G^{\Theta,\text{DeWitt}}$ and $G^{\Theta,\text{coupled}}$) annihilate them to machine zero!
+""",
+        },
+        {
+            "type": "code",
+            "source": r"""
+probe_model = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=7)
+params_probe = {k: v.detach() for k, v in probe_model.named_parameters()}
+
+# 1. Verify Gauss-equation curvature equivalence to float64 machine precision
+ref_geom = compute_layer_geometry(probe_model, X_train[:64], layer_idx=5, metric_mode="graph", params=params_probe)
+g_fast, K_fast = compute_fast_graph_geometry(probe_model, X_train[:64], params=params_probe)
+print(f"Gauss Equation Consistency | max |g_fast - g_ref| = {(g_fast - ref_geom['g']).abs().max().item():.2e}")
+print(f"Gauss Equation Consistency | max |K_fast - K_ref| = {(K_fast - ref_geom['K']).abs().max().item():.2e}\n")
+
+# 2. Construct unit parameter vectors for the 3 E(2) output symmetry generators + a generic hidden direction
+def build_unit_param_direction(overrides: dict, seed_random: int | None = None) -> torch.Tensor:
+    if seed_random is not None:
+        gen = torch.Generator().manual_seed(seed_random)
+        raw = torch.randn(sum(p.numel() for p in params_probe.values()), generator=gen, dtype=torch.float64)
+        return raw / raw.norm()
+    chunks = []
+    for k, p in params_probe.items():
+        if k in overrides:
+            chunks.append(overrides[k].reshape(-1))
+        else:
+            chunks.append(torch.zeros_like(p).reshape(-1))
+    vec = torch.cat(chunks)
+    return vec / vec.norm()
+
+omega = torch.tensor([[0.0, -1.0], [1.0, 0.0]], dtype=torch.float64)
+directions = [
+    ("Trans. z^1 (b5_0)", build_unit_param_direction({"layers.4.bias": torch.tensor([1.0, 0.0], dtype=torch.float64)})),
+    ("Trans. z^2 (b5_1)", build_unit_param_direction({"layers.4.bias": torch.tensor([0.0, 1.0], dtype=torch.float64)})),
+    ("Rot. so(2) (W5,b5)", build_unit_param_direction({
+        "layers.4.weight": omega @ params_probe["layers.4.weight"],
+        "layers.4.bias": omega @ params_probe["layers.4.bias"],
+    })),
+    ("Generic Hidden Dir.", build_unit_param_direction({}, seed_random=123)),
+]
+
+G_eucl = torch.eye(422, dtype=torch.float64)
+G_coord_0 = compute_uncoupled_coord_metric(probe_model, X_train, damping=0.0)
+G_dewitt_0 = compute_coupled_dewitt_metric(probe_model, X_train, metric_mode="graph", damping=0.0)
+G_coup_vol_0 = compute_coupled_geometric_metric(probe_model, X_train, y_train, task="volume", margin=0.60, damping=0.0)
+G_coup_curv_0 = compute_coupled_geometric_metric(probe_model, X_train, y_train, task="curvature", margin=0.40, damping=0.0)
+
+metric_mats = [
+    ("Uncoupled I_P", G_eucl, "#7f7f7f"),
+    ("Uncoupled Coord-GGN", G_coord_0, "#ff7f0e"),
+    ("Coupled DeWitt", G_dewitt_0, "#1f77b4"),
+    ("Coupled Curvature-GGN", G_coup_curv_0, "#2ca02c"),
+]
+
+print(f"{'Parameter Direction':<22} | {'Uncoupled I_P':>14} | {'Uncoupled Coord':>15} | {'Coupled DeWitt':>15} | {'Coupled Curv-GGN':>16}")
+print("-" * 94)
+quad_table = {m_name: [] for m_name, _, _ in metric_mats}
+for d_name, v in directions:
+    vals = []
+    for m_name, G_mat, _ in metric_mats:
+        q = abs(float(v @ (G_mat @ v)))
+        quad_table[m_name].append(max(q, 1e-18))
+        vals.append(q)
+    print(f"{d_name:<22} | {vals[0]:14.3e} | {vals[1]:15.3e} | {vals[2]:15.3e} | {vals[3]:16.3e}")
+
+fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.4))
+
+# Panel 1: Quadratic form on E(2) output symmetry generators vs generic direction
+x_pos = np.arange(len(directions))
+bar_w = 0.19
+for idx, (m_name, _, col) in enumerate(metric_mats):
+    axes[0].bar(x_pos + (idx - 1.5) * bar_w, quad_table[m_name], width=bar_w, color=col, edgecolor="k", alpha=0.88, label=m_name)
+axes[0].set_yscale("log")
+axes[0].set_ylim(1e-19, 5e1)
+axes[0].set_xticks(x_pos)
+axes[0].set_xticklabels([d[0] for d in directions], rotation=12)
+axes[0].set_ylabel(r"Metric Norm Squared $|v^T G^\Theta v|$ (log scale)")
+axes[0].set_title(r"Exact Quotienting of $E(2)$ Output Symmetries")
+axes[0].legend(fontsize=8.5, loc="upper left")
+axes[0].grid(axis="y", alpha=0.3)
+
+# Panel 2: Eigenvalue spectra of the 422x422 parameter metrics
+spec_items = [
+    ("Uncoupled Coord-GGN", G_coord_0, "#ff7f0e", "--"),
+    ("Coupled DeWitt (Graph)", G_dewitt_0, "#1f77b4", "-"),
+    ("Coupled Volume-GGN", G_coup_vol_0, "#9467bd", "-."),
+    ("Coupled Curvature-GGN", G_coup_curv_0, "#2ca02c", "-"),
+]
+for label, G_m, col, ls in spec_items:
+    ev = torch.linalg.eigvalsh(G_m).flip(0).clamp(min=1e-16).numpy()
+    axes[1].plot(range(1, len(ev) + 1), ev, lw=2.0, color=col, ls=ls, label=label)
+
+axes[1].set_xscale("log")
+axes[1].set_yscale("log")
+axes[1].set_xlabel(r"Eigenvalue Index $k$ ($P = 422$)")
+axes[1].set_ylabel(r"Eigenvalue $\lambda_k(G^\Theta(\theta))$")
+axes[1].set_title("422x422 Parameter Metric Spectra at Initialization")
+axes[1].legend(fontsize=8.5)
+axes[1].grid(alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+""",
+        },
+        {
+            "type": "markdown",
+            "source": r"""
+## 2. Coupled vs. Uncoupled Optimization Across All Three Purely Geometric Losses
+
+We now train identical `[2 -> 5 -> 10 -> 15 -> 10 -> 2]` MLPs (`seed = 7`) for **45 optimization steps** across all three purely geometric classification paradigms:
+1. **Volume-Element Contrastive Loss**: $\log\sqrt{\det g^{(5)}(x)} \le -0.60$ (Class $0$) vs. $\ge +0.60$ (Class $1$) under Euclidean pullback $g^{(5)} = J_x^T J_x + \epsilon I_2$.
+2. **Metric Anisotropy Margin Loss**: $\log(\tilde{g}^{(5)}_{11}(x) / \tilde{g}^{(5)}_{22}(x)) \le -0.45$ (Class $0$) vs. $\ge +0.45$ (Class $1$) under Graph pullback $\tilde{g}^{(5)} = I_2 + J_x^T J_x$.
+3. **Gaussian Curvature Margin Loss**: $K^{(5)}(x) \le -0.40$ (Class $0$) vs. $\ge +0.40$ (Class $1$) under Graph pullback $\tilde{g}^{(5)} = I_2 + J_x^T J_x$.
+
+For each loss, we compare **Uncoupled Euclidean GD**, **Uncoupled Adam**, **Uncoupled Coord-NGD** ($G^{\Theta,\text{coord}}$), and **Coupled Geom-NGD** ($G^{\Theta,\text{coupled}}$), enforcing an identical Riemannian trust-region radius $\|\Delta\theta\|_{G^\Theta} \le 0.85$ on both natural-gradient methods so the comparison isolates **metric coupling** purely.
+""",
+        },
+        {
+            "type": "code",
+            "source": r"""
+TASK_CONFIGS = {
+    "volume": {
+        "title": r"Volume-Element Loss ($\log\sqrt{\det g^{(5)}}$)",
+        "margin": 0.60,
+        "gd_lr": 0.08,
+        "adam_lr": 0.02,
+        "coord_lr": 0.22,
+        "coupled_lr": 0.32,
+        "dewitt_weight": 0.30,
+        "damping": 0.025,
+    },
+    "anisotropy": {
+        "title": r"Metric Anisotropy Loss ($\log(\tilde{g}_{11}/\tilde{g}_{22})$)",
+        "margin": 0.45,
+        "gd_lr": 0.08,
+        "adam_lr": 0.02,
+        "coord_lr": 0.22,
+        "coupled_lr": 0.32,
+        "dewitt_weight": 0.25,
+        "damping": 0.020,
+    },
+    "curvature": {
+        "title": r"Gaussian Curvature Loss ($K^{(5)} \lessgtr 0$)",
+        "margin": 0.40,
+        "gd_lr": 0.04,
+        "adam_lr": 0.02,
+        "coord_lr": 0.12,
+        "coupled_lr": 0.28,
+        "dewitt_weight": 0.20,
+        "damping": 0.025,
+    },
+}
+
+
+def evaluate_geometric_task(model: MoonsMLP, X_tr: torch.Tensor, y_tr: torch.Tensor, X_te: torch.Tensor, y_te: torch.Tensor, task: str, margin: float):
+    params = dict(model.named_parameters())
+    if task == "volume":
+        g_tr = compute_layer_pullback_metric(model, X_tr, layer_idx=5, metric_mode="euclidean", eps=1e-6, params=params)
+        loss, metrics = volume_contrastive_loss(g_tr, y_tr, margin=margin)
+        with torch.no_grad():
+            g_te = compute_layer_pullback_metric(model, X_te, layer_idx=5, metric_mode="euclidean", eps=1e-6)
+            psi_te = 0.5 * torch.log(torch.clamp(torch.linalg.det(g_te), min=1e-8))
+            te_acc = ((psi_te > 0.0).long() == y_te).float().mean().item()
+        return loss, metrics["geom_acc"], te_acc
+
+    if task == "anisotropy":
+        g_tr = compute_layer_pullback_metric(model, X_tr, layer_idx=5, metric_mode="graph", params=params)
+        loss, metrics = anisotropy_margin_loss(g_tr, y_tr, margin=margin)
+        with torch.no_grad():
+            g_te = compute_layer_pullback_metric(model, X_te, layer_idx=5, metric_mode="graph")
+            psi_te = torch.log(torch.clamp(g_te[:, 0, 0], min=1e-8) / torch.clamp(g_te[:, 1, 1], min=1e-8))
+            te_acc = ((psi_te > 0.0).long() == y_te).float().mean().item()
+        return loss, metrics["geom_acc"], te_acc
+
+    if task == "curvature":
+        g_tr, K_tr = compute_fast_graph_geometry(model, X_tr, params=params)
+        loss, metrics = curvature_margin_loss(K_tr, y_tr, g_tr, margin=margin, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0)
+        with torch.no_grad():
+            _, K_te = compute_fast_graph_geometry(model, X_te)
+            te_acc = ((K_te > 0.0).long() == y_te).float().mean().item()
+        return loss, metrics["geom_acc"], te_acc
+
+    raise ValueError(task)
+
+
+def train_geometric_optimizer(task: str, opt_kind: str, n_steps: int = 45, seed: int = 7):
+    cfg = TASK_CONFIGS[task]
+    margin = cfg["margin"]
+    mdl = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=seed)
+    b5_init = mdl.layers[4].bias.detach().clone()
+
+    adam_opt = torch.optim.Adam(mdl.parameters(), lr=cfg["adam_lr"]) if opt_kind == "adam" else None
+    hist = {"loss": [], "train_acc": [], "test_acc": [], "b5_drift": [], "time_s": []}
+    t_start = time.perf_counter()
+
+    for step in range(n_steps):
+        mdl.zero_grad()
+        loss, tr_acc, te_acc = evaluate_geometric_task(mdl, X_train, y_train, X_test, y_test, task, margin)
+        b5_drift = (mdl.layers[4].bias.detach() - b5_init).norm().item()
+
+        hist["loss"].append(loss.item())
+        hist["train_acc"].append(tr_acc * 100.0)
+        hist["test_acc"].append(te_acc * 100.0)
+        hist["b5_drift"].append(b5_drift)
+        hist["time_s"].append(time.perf_counter() - t_start)
+
+        loss.backward()
+
+        if opt_kind == "gd":
+            if task == "curvature":
+                torch.nn.utils.clip_grad_norm_(mdl.parameters(), max_norm=5.0)
+            with torch.no_grad():
+                for p in mdl.parameters():
+                    if p.grad is not None:
+                        p -= cfg["gd_lr"] * p.grad
+        elif opt_kind == "adam":
+            if task == "curvature":
+                torch.nn.utils.clip_grad_norm_(mdl.parameters(), max_norm=5.0)
+            adam_opt.step()
+        elif opt_kind in ("coord_ngd", "coupled_ngd"):
+            grad_flat = torch.cat([
+                p.grad.reshape(-1) if p.grad is not None else torch.zeros(p.numel(), dtype=X_train.dtype, device=X_train.device)
+                for p in mdl.parameters()
+            ])
+            if opt_kind == "coord_ngd":
+                G_mat = compute_uncoupled_coord_metric(mdl, X_train, damping=cfg["damping"])
+                lr = cfg["coord_lr"]
+            else:
+                G_mat = compute_coupled_geometric_metric(
+                    mdl,
+                    X_train,
+                    y_train,
+                    task=task,
+                    margin=margin,
+                    dewitt_weight=cfg["dewitt_weight"],
+                    damping=cfg["damping"],
+                )
+                lr = cfg["coupled_lr"]
+
+            nat_dir = torch.linalg.solve(G_mat, grad_flat)
+            riem_norm = torch.sqrt(torch.clamp(nat_dir @ (G_mat @ nat_dir), min=1e-12)).item()
+            trust_scale = min(1.0, 0.85 / riem_norm)
+            with torch.no_grad():
+                offset = 0
+                for p in mdl.parameters():
+                    n = p.numel()
+                    p -= (lr * trust_scale) * nat_dir[offset : offset + n].reshape(p.shape)
+                    offset += n
+        else:
+            raise ValueError(opt_kind)
+
+    # Record final post-step evaluation at step = n_steps
+    with torch.no_grad():
+        pass
+    loss_f, tr_f, te_f = evaluate_geometric_task(mdl, X_train, y_train, X_test, y_test, task, margin)
+    hist["loss"].append(loss_f.item())
+    hist["train_acc"].append(tr_f * 100.0)
+    hist["test_acc"].append(te_f * 100.0)
+    hist["b5_drift"].append((mdl.layers[4].bias.detach() - b5_init).norm().item())
+    hist["time_s"].append(time.perf_counter() - t_start)
+
+    return mdl, hist
+
+
+OPTIMIZER_SPECS = [
+    ("gd", "Uncoupled GD (I_P)", "#7f7f7f", ":"),
+    ("adam", "Uncoupled Adam", "#1f77b4", "--"),
+    ("coord_ngd", "Uncoupled Coord-NGD", "#ff7f0e", "-."),
+    ("coupled_ngd", "Coupled Geom-NGD", "#2ca02c", "-"),
+]
+
+N_STEPS = 45
+all_runs = {t: {} for t in ["volume", "anisotropy", "curvature"]}
+
+print(f"{'Geometric Task':<13} | {'Optimizer':<21} | {'Step 10 Acc':>11} | {'Step 25 Acc':>11} | {'Final Loss':>10} | {'Final Test Acc':>14} | {'b5 Gauge Drift':>14}")
+print("-" * 112)
+
+for task_name in ["volume", "anisotropy", "curvature"]:
+    for opt_key, opt_label, _, _ in OPTIMIZER_SPECS:
+        mdl_trained, h = train_geometric_optimizer(task_name, opt_key, n_steps=N_STEPS, seed=7)
+        all_runs[task_name][opt_key] = (mdl_trained, h)
+        print(
+            f"{task_name:<13} | {opt_label:<21} | {h['test_acc'][10]:10.2f}% | {h['test_acc'][25]:10.2f}% | "
+            f"{h['loss'][-1]:10.4f} | {h['test_acc'][-1]:13.2f}% | {h['b5_drift'][-1]:14.3e}"
+        )
+    print("-" * 112)
+
+# Plot 2x3 Convergence Curves (Loss & Test Accuracy across all 3 geometric losses)
+fig, axes = plt.subplots(2, 3, figsize=(16.8, 7.6), sharex=True)
+steps_axis = np.arange(N_STEPS + 1)
+
+for col_idx, task_name in enumerate(["volume", "anisotropy", "curvature"]):
+    for opt_key, opt_label, col, ls in OPTIMIZER_SPECS:
+        _, h = all_runs[task_name][opt_key]
+        lw = 2.6 if opt_key == "coupled_ngd" else 1.9
+        axes[0, col_idx].plot(steps_axis, h["loss"], color=col, ls=ls, lw=lw, label=opt_label)
+        axes[1, col_idx].plot(steps_axis, h["test_acc"], color=col, ls=ls, lw=lw, label=opt_label)
+
+    axes[0, col_idx].set_yscale("log")
+    axes[0, col_idx].set_title(TASK_CONFIGS[task_name]["title"])
+    axes[0, col_idx].grid(alpha=0.3, which="both")
+
+    axes[1, col_idx].set_ylim(38.0, 102.5)
+    axes[1, col_idx].set_xlabel("Optimization Step")
+    axes[1, col_idx].grid(alpha=0.3)
+
+axes[0, 0].set_ylabel("Geometric Loss (log scale)")
+axes[1, 0].set_ylabel("Held-Out Test Accuracy (%)")
+axes[0, 0].legend(fontsize=8.5, loc="upper right")
+axes[1, 2].legend(fontsize=8.5, loc="lower right")
+
+plt.suptitle("Coupled Data-Geometry Natural Gradient vs. Uncoupled Optimizers Across All Three Geometric Losses", y=1.02, fontsize=13)
+plt.tight_layout()
+plt.show()
+""",
+        },
+        {
+            "type": "markdown",
+            "source": r"""
+## 3. $3 \times 4$ Spatial Decision Landscapes: Coupled vs. Uncoupled Learned Manifolds
+
+To inspect how parameter-data metric coupling shapes the learned representation manifold in ambient input space $(x^1, x^2)$, we plot the learned target geometric field $\psi(x^1, x^2)$ after 45 steps across all **3 geometric objectives (rows)** and **4 optimizers (columns)**. Each panel is centered at the geometric decision threshold $\psi(x) = 0$ (black contour; blue $< 0$ for Class $0$, red $> 0$ for Class $1$).
+""",
+        },
+        {
+            "type": "code",
+            "source": r"""
+def eval_target_field_on_points(mdl: MoonsMLP, pts: torch.Tensor, task: str) -> np.ndarray:
+    if task == "volume":
+        g = compute_layer_pullback_metric(mdl, pts, layer_idx=5, metric_mode="euclidean", eps=1e-6)
+        return (0.5 * torch.log(torch.clamp(torch.linalg.det(g), min=1e-8))).detach().numpy()
+    if task == "anisotropy":
+        g = compute_layer_pullback_metric(mdl, pts, layer_idx=5, metric_mode="graph")
+        return torch.log(torch.clamp(g[:, 0, 0], min=1e-8) / torch.clamp(g[:, 1, 1], min=1e-8)).detach().numpy()
+    if task == "curvature":
+        _, K = compute_fast_graph_geometry(mdl, pts)
+        return np.arcsinh(K.detach().numpy())
+    raise ValueError(task)
+
+row_specs = [
+    ("volume", "Log Volume\n" + r"$\log\sqrt{\det g^{(5)}(x)}$"),
+    ("anisotropy", "Anisotropy\n" + r"$\log(\tilde{g}^{(5)}_{11}/\tilde{g}^{(5)}_{22})$"),
+    ("curvature", "Curvature\n" + r"$\mathrm{arcsinh}(K^{(5)}(x))$"),
+]
+
+fig, axes = plt.subplots(3, 4, figsize=(17.2, 11.0), sharex=True, sharey=True)
+
+for r_idx, (task_name, row_lbl) in enumerate(row_specs):
+    for c_idx, (opt_key, opt_label, _, _) in enumerate(OPTIMIZER_SPECS):
+        ax = axes[r_idx, c_idx]
+        mdl, h = all_runs[task_name][opt_key]
+        fld = eval_target_field_on_points(mdl, grid_pts, task_name).reshape(xx.shape)
+        vm = float(max(np.percentile(np.abs(fld), 96), 0.25))
+        norm = TwoSlopeNorm(vmin=-vm, vcenter=0.0, vmax=vm)
+
+        im = ax.contourf(xx, yy, fld, levels=np.linspace(-vm, vm, 25), cmap="RdBu_r", norm=norm, extend="both")
+        if fld.min() < 0.0 < fld.max():
+            ax.contour(xx, yy, fld, levels=[0.0], colors="k", linewidths=1.9)
+
+        ax.scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", edgecolors="w", s=18, alpha=0.85)
+        ax.scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", edgecolors="w", s=18, alpha=0.85)
+
+        acc_final = h["test_acc"][-1]
+        loss_final = h["loss"][-1]
+        is_coupled = opt_key == "coupled_ngd"
+        header = f"{opt_label}\n" if r_idx == 0 else ""
+        ax.set_title(
+            f"{header}Acc: {acc_final:.1f}% | Loss: {loss_final:.3f}",
+            fontsize=9.5,
+            fontweight="bold" if is_coupled else "normal",
+        )
+        if c_idx == 0:
+            ax.set_ylabel(f"{row_lbl}\n$x^2$", fontsize=10)
+        if r_idx == 2:
+            ax.set_xlabel("$x^1$", fontsize=10)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+
+plt.suptitle("Learned Geometric Decision Landscapes at Step 45: Uncoupled Baselines vs. Coupled Geometric NGD", y=1.01, fontsize=13.5)
+plt.tight_layout()
+plt.show()
+""",
+        },
+        {
+            "type": "markdown",
+            "source": r"""
+## 4. Mechanistic Diagnostics: Spurious Gauge Drift & Unclipped Curvature Stiffness
+
+Comparing the optimization trajectories exposes **two fundamental geometric mechanisms** distinguishing coupled from uncoupled parameter metrics:
+
+1. **Elimination of Cross-Covariance Gauge Drift (`Uncoupled Coord-NGD` vs. `Coupled Geom-NGD`)**:
+   Even though $\nabla_{b^{(5)}} \mathcal{L}_{\text{geom}} \equiv 0$ identically (output translations never affect spatial Jacobians $J_x$), `Uncoupled Coord-NGD` exhibits large drift in $b^{(5)}$! Why? Because $G^{\Theta,\text{coord}} = \mathbb{E}_x[(J_\theta z)^T (J_\theta z)]$ has non-zero off-diagonal cross-covariance $\mathbb{E}_x[\partial_{\theta_{\text{hidden}}} z]$ coupling hidden weights to $b^{(5)}$. Solving $G^{\Theta,\text{coord}} \Delta\theta = -\nabla_\theta \mathcal{L}_{\text{geom}}$ actively shifts $b^{(5)}$ to cancel the mean displacement of $W^{(5)} h^{(4)}(x)$, wasting trust-region budget on a pure gauge direction. `Coupled Geom-NGD` has zero cross-covariance with $E(2)$ gauge modes and keeps $\|b^{(5)}(t) - b^{(5)}(0)\|_2 = 0$ identically.
+2. **Intrinsic Stiffness Preconditioning Without Gradient Clipping**:
+   In Notebooks 04 and 05, 3rd-order Gaussian curvature optimization required explicit gradient norm clipping (`clip_grad_norm_`) because regions with small $\det\tilde{g}$ trigger sharp Euclidean gradient spikes ($\nabla_\theta K \propto (\det\tilde{g})^{-2}$). Below we **disable all gradient norm clipping** and push a stiffer curvature margin ($\tau = 0.65, k_{\text{clip}} = 25$): uncoupled Euclidean GD suffers violent gradient/loss spikes, whereas `Coupled Geom-NGD` automatically attenuates stiff directions through $(G^{\Theta,\text{coupled}})^{-1}$!
+""",
+        },
+        {
+            "type": "code",
+            "source": r"""
+# Unclipped high-stiffness curvature experiment (no clip_grad_norm_)
+def run_unclipped_curvature_stiffness_test(steps: int = 35):
+    results_stiff = {}
+    for mode_name, lr in [("Uncoupled GD (Unclipped, lr=0.07)", 0.07), ("Coupled Geom-NGD (Unclipped, lr=0.28)", 0.28)]:
+        mdl = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=7)
+        losses, grad_norms, test_accs = [], [], []
+
+        for _ in range(steps):
+            mdl.zero_grad()
+            params = dict(mdl.named_parameters())
+            g_tr, K_tr = compute_fast_graph_geometry(mdl, X_train, params=params)
+            loss, _ = curvature_margin_loss(K_tr, y_train, g_tr, margin=0.65, lambda_vol=0.02, lambda_iso=0.005, k_clip=25.0)
+            loss.backward()
+
+            g_flat = torch.cat([
+                p.grad.reshape(-1) if p.grad is not None else torch.zeros(p.numel(), dtype=X_train.dtype)
+                for p in mdl.parameters()
+            ])
+            grad_norms.append(g_flat.norm().item())
+            losses.append(loss.item())
+
+            with torch.no_grad():
+                _, K_te = compute_fast_graph_geometry(mdl, X_test)
+                test_accs.append(((K_te > 0.0).long() == y_test).float().mean().item() * 100.0)
+
+            if "Uncoupled" in mode_name:
+                # Raw unclipped Euclidean step
+                with torch.no_grad():
+                    for p in mdl.parameters():
+                        if p.grad is not None:
+                            p -= lr * p.grad
+            else:
+                G_c = compute_coupled_geometric_metric(
+                    mdl, X_train, y_train, task="curvature", margin=0.65, k_clip=25.0, dewitt_weight=0.20, damping=0.025
+                )
+                nat_step = torch.linalg.solve(G_c, g_flat)
+                r_norm = torch.sqrt(torch.clamp(nat_step @ (G_c @ nat_step), min=1e-12)).item()
+                scale = min(1.0, 0.85 / r_norm)
+                with torch.no_grad():
+                    offset = 0
+                    for p in mdl.parameters():
+                        n = p.numel()
+                        p -= (lr * scale) * nat_step[offset : offset + n].reshape(p.shape)
+                        offset += n
+
+        results_stiff[mode_name] = {"loss": losses, "grad_norm": grad_norms, "test_acc": test_accs}
+    return results_stiff
+
+stiff_res = run_unclipped_curvature_stiffness_test(steps=35)
+
+fig, axes = plt.subplots(1, 3, figsize=(16.5, 4.3))
+
+# Panel 1: Spurious b5 translation gauge drift across the 3 tasks
+task_colors = {"volume": "#9467bd", "anisotropy": "#ff7f0e", "curvature": "#d62728"}
+for t_name, t_col in task_colors.items():
+    axes[0].plot(all_runs[t_name]["coord_ngd"][1]["b5_drift"], ls="-.", lw=2.0, color=t_col, label=f"Uncoupled Coord-NGD ({t_name})")
+    axes[0].plot(all_runs[t_name]["coupled_ngd"][1]["b5_drift"], ls="-", lw=2.2, color=t_col, alpha=0.85, label=f"Coupled Geom-NGD ({t_name})")
+
+axes[0].set_xlabel("Optimization Step")
+axes[0].set_ylabel(r"Output Bias Drift $\|b^{(5)}(t) - b^{(5)}(0)\|_2$")
+axes[0].set_title(r"Spurious Translation Gauge Drift on $\Theta$")
+axes[0].legend(fontsize=7.5, ncol=1, loc="upper left")
+axes[0].grid(alpha=0.3)
+
+# Panel 2: Unclipped curvature loss stability
+for label, col, ls in [
+    ("Uncoupled GD (Unclipped, lr=0.07)", "#d62728", "--"),
+    ("Coupled Geom-NGD (Unclipped, lr=0.28)", "#2ca02c", "-"),
+]:
+    axes[1].plot(stiff_res[label]["loss"], color=col, ls=ls, lw=2.2, label=label)
+    axes[2].plot(stiff_res[label]["grad_norm"], color=col, ls=ls, lw=2.0, label=label)
+
+axes[1].set_xlabel("Optimization Step")
+axes[1].set_ylabel(r"Curvature Margin Loss ($\tau = 0.65$)")
+axes[1].set_title("Unclipped 3rd-Order Curvature Loss Trajectory")
+axes[1].legend(fontsize=8.2)
+axes[1].grid(alpha=0.3)
+
+axes[2].set_yscale("log")
+axes[2].set_xlabel("Optimization Step")
+axes[2].set_ylabel(r"Euclidean Gradient Norm $\|\nabla_\theta \mathcal{L}_{\mathrm{curv}}\|_2$")
+axes[2].set_title("Euclidean Gradient Spikes vs. Coupled Stability")
+axes[2].legend(fontsize=8.2)
+axes[2].grid(alpha=0.3, which="both")
+
+plt.tight_layout()
+plt.show()
+""",
+        },
+        {
+            "type": "markdown",
+            "source": r"""
+## 5. Ablation: Universal Unsupervised DeWitt Metric ($G^{\Theta,\text{DeWitt}}$) vs. Task-Coupled Metric ($G^{\Theta,\text{coupled}}$)
+
+Finally, we isolate the role of the **two coupled terms** in $G^{\Theta,\text{coupled}}$:
+- **Pure DeWitt Metric Pullback ($G^{\Theta,\text{DeWitt}}$)**: Depends *exclusively* on the induced $2 \times 2$ data-space metric $g(x; \theta)$ via $\mathbb{E}_x[\mathrm{Tr}(g^{-1}\partial_\mu g\, g^{-1}\partial_\nu g)]$—completely unsupervised with respect to class labels $y$ and agnostic to which geometric invariant is in the loss.
+- **Task-Coupled Geometric Metric ($G^{\Theta,\text{coupled}}$)**: Augments $G^{\Theta,\text{DeWitt}}$ with the Generalized Gauss-Newton pullback of the target invariant $\psi(x; \theta)$. For Gaussian curvature $K^{(5)}(x; \theta)$ (a 2nd-order spatial differential invariant of $g$), adding $\partial_\theta K^{(5)}$ upgrades the 0th-order $L^2$ DeWitt metric on $\mathrm{Met}(\mathcal{M}_0)$ to a **2nd-order Sobolev-DeWitt metric**, yielding an additional jump in convergence speed!
+""",
+        },
+        {
+            "type": "code",
+            "source": r"""
+def train_pure_dewitt_ngd(task: str, n_steps: int = 45, seed: int = 7):
+    cfg = TASK_CONFIGS[task]
+    margin = cfg["margin"]
+    m_mode = "euclidean" if task == "volume" else "graph"
+    mdl = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=seed)
+    hist = {"loss": [], "test_acc": []}
+
+    for _ in range(n_steps):
+        mdl.zero_grad()
+        loss, _, te_acc = evaluate_geometric_task(mdl, X_train, y_train, X_test, y_test, task, margin)
+        hist["loss"].append(loss.item())
+        hist["test_acc"].append(te_acc * 100.0)
+        loss.backward()
+
+        g_flat = torch.cat([
+            p.grad.reshape(-1) if p.grad is not None else torch.zeros(p.numel(), dtype=X_train.dtype)
+            for p in mdl.parameters()
+        ])
+        G_dw = compute_coupled_dewitt_metric(mdl, X_train, metric_mode=m_mode, eps=1e-6, inv_eps=1e-3, damping=cfg["damping"])
+        nat_dir = torch.linalg.solve(G_dw, g_flat)
+        r_norm = torch.sqrt(torch.clamp(nat_dir @ (G_dw @ nat_dir), min=1e-12)).item()
+        scale = min(1.0, 0.85 / r_norm)
+        lr_dw = 0.35 if task != "curvature" else 0.20
+        with torch.no_grad():
+            offset = 0
+            for p in mdl.parameters():
+                n = p.numel()
+                p -= (lr_dw * scale) * nat_dir[offset : offset + n].reshape(p.shape)
+                offset += n
+
+    loss_f, _, te_f = evaluate_geometric_task(mdl, X_train, y_train, X_test, y_test, task, margin)
+    hist["loss"].append(loss_f.item())
+    hist["test_acc"].append(te_f * 100.0)
+    return hist
+
+dewitt_runs = {t: train_pure_dewitt_ngd(t, n_steps=N_STEPS, seed=7) for t in ["volume", "anisotropy", "curvature"]}
+
+fig, axes = plt.subplots(1, 3, figsize=(16.5, 4.2), sharey=False)
+for idx, task_name in enumerate(["volume", "anisotropy", "curvature"]):
+    axes[idx].plot(all_runs[task_name]["gd"][1]["loss"], ":", lw=1.9, color="#7f7f7f", label=r"Uncoupled GD ($I_P$)")
+    axes[idx].plot(dewitt_runs[task_name]["loss"], "--", lw=2.2, color="#1f77b4", label=r"Coupled DeWitt-NGD ($G^{\Theta,\mathrm{DeWitt}}$)")
+    axes[idx].plot(all_runs[task_name]["coupled_ngd"][1]["loss"], "-", lw=2.5, color="#2ca02c", label=r"Task-Coupled Geom-NGD ($G^{\Theta,\mathrm{coupled}}$)")
+    axes[idx].set_yscale("log")
+    axes[idx].set_xlabel("Optimization Step")
+    axes[idx].set_title(TASK_CONFIGS[task_name]["title"])
+    axes[idx].grid(alpha=0.3, which="both")
+
+axes[0].set_ylabel("Geometric Loss (log scale)")
+axes[0].legend(fontsize=8.3)
+plt.suptitle("Ablation: Unsupervised Data-Metric Pullback (DeWitt) vs. Full Sobolev/Task-Coupled Pullback", y=1.03, fontsize=13)
+plt.tight_layout()
+plt.show()
+
+print(f"{'Task':<12} | {'Uncoupled GD Final Loss (Acc)':<32} | {'Pure DeWitt-NGD Final Loss (Acc)':<34} | {'Task-Coupled NGD Final Loss (Acc)':<34}")
+print("-" * 120)
+for t in ["volume", "anisotropy", "curvature"]:
+    h_gd = all_runs[t]["gd"][1]
+    h_dw = dewitt_runs[t]
+    h_cp = all_runs[t]["coupled_ngd"][1]
+    print(
+        f"{t:<12} | {h_gd['loss'][-1]:8.4f} ({h_gd['test_acc'][-1]:6.2f}%)               | "
+        f"{h_dw['loss'][-1]:8.4f} ({h_dw['test_acc'][-1]:6.2f}%)                 | "
+        f"{h_cp['loss'][-1]:8.4f} ({h_cp['test_acc'][-1]:6.2f}%)"
+    )
+""",
+        },
+    ]
+    build_and_execute_notebook(ROOT / "notebooks" / "06-coupled-optimization.ipynb", cells)
+
+
+def build_notebook_07() -> None:
+    cells = [
+        {
+            "type": "markdown",
+            "source": r"""
+# Notebook 07: Evaluating Efficient First-Order Approximations for Geometric Training
+
+## Research Objective
+Training neural networks with **exact differential-geometric losses** requires nested symbolic automatic differentiation:
+- **Volume-Element** ($\log\sqrt{\det g^{(5)}}$) and **Metric Anisotropy** ($\log(\tilde{g}^{(5)}_{11}/\tilde{g}^{(5)}_{22})$) require **2nd-order** mixed derivatives $\nabla_\theta \partial_x z$.
+- **Gaussian Curvature** ($K^{(5)} = R_{1212}/\det\tilde{g}^{(5)}$) requires **3rd-order** mixed derivatives $\nabla_\theta \partial_x^2 z$ (and up to $1{,}122$ autograd graph nodes and $>500\text{ MB/step}$ in naive Levi-Civita form).
+
+In this notebook, we implement and benchmark **four principled approaches** that reduce compute and memory toward standard **1st-order `SGD` with Cross-Entropy loss** by replacing symbolic spatial derivatives with forward-only discrete or algebraic geometric operators:
+
+1. **Approach 1 — Batched Finite-Difference Stencils (Pure 1st-Order Autodiff)**:
+   Evaluates displaced spatial inputs in a single batched forward pass (`3N` for $g_{ij}$, `7N` central stencil + Gauss's equation for $K$), completely eliminating nested `jacrev`/`jacfwd` graphs so `loss.backward()` is a pure 1st-order pass.
+2. **Approach 2 — Precomputed Point-Cloud $k$-NN Taylor Jet Operators (`1N` Single Forward Pass)**:
+   Fits Gaussian-weighted local linear (`order=1`) or quadratic (`order=2`) Taylor regression operators $Q_i$ on input $k$-nearest neighbors **once at $t=0$**, computing $(\hat{g}_i, \hat{K}_i)$ online from the **exact same single `1N` forward pass `Z = model(X)` as Cross-Entropy `SGD`** (zero extra network evaluations).
+3. **Approach 3 — Randomized Tangent-Plane Sketching / Hutchinson Directional Probes ($O(1)$ in Input Dimension $d_0$)**:
+   Evaluates directional differences along $m \in \{1, 2\}$ random orthonormal tangent vectors $Q \in \mathbb{R}^{d_0 \times m}$, keeping forward evaluations strictly $O(1)$ even when ambient input dimension $d_0 \gg 2$.
+4. **Approach 4 — Algebraic Order Reduction Before Autodiff (Gauss's Extrinsic-to-Intrinsic Identity)**:
+   Replaces 3rd-order intrinsic Levi-Civita metric derivatives $\partial_x^2 g_{ij}$ with Gauss's equation $R_{1212} = \langle \mathrm{II}_{11}, \mathrm{II}_{22}\rangle - \|\mathrm{II}_{12}\|^2$, cancelling cancelling $\partial_x^3 z$ autodiff terms analytically with **zero approximation error**.
+""",
+        },
+        {
+            "type": "code",
+            "source": r"""
+import sys
+from pathlib import Path
+for p in [Path.cwd(), Path.cwd().parent]:
+    if (p / "src" / "geometry.py").exists() and str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+import time
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.profiler import ProfilerActivity, profile
+import matplotlib.pyplot as plt
+from matplotlib.colors import TwoSlopeNorm
+
+from src.geometry import (
+    MoonsMLP,
+    get_moons_dataset,
+    make_evaluation_grid,
+    compute_layer_geometry,
+    compute_layer_pullback_metric,
+    compute_fast_graph_geometry,
+    compute_fd_pullback_metric,
+    compute_fd_graph_curvature,
+    build_knn_jet_operator,
+    compute_knn_jet_geometry,
+    compute_sketched_pullback_metric,
+    compute_sketched_plane_curvature,
+    compute_coupled_geometric_metric,
+    woodbury_coupled_ngd_direction,
+    curvature_margin_loss,
+    volume_contrastive_loss,
+    anisotropy_margin_loss,
+)
+
+plt.rcParams["figure.dpi"] = 120
+plt.rcParams["font.size"] = 10
+
+X_train, y_train, X_test, y_test = get_moons_dataset(n_train=220, n_test=120, noise=0.10, seed=42)
+xx, yy, grid_pts = make_evaluation_grid(X_train, n_grid=28, padding=0.45)
+
+# Precompute offline t=0 point-cloud k-NN operators (Approach 2)
+t0_knn = time.perf_counter()
+knn_idx_lin, knn_op_lin = build_knn_jet_operator(X_train, k_neighbors=10, order=1, ridge=1e-4)
+knn_idx_quad, knn_op_quad = build_knn_jet_operator(X_train, k_neighbors=16, order=2, ridge=1e-4)
+knn_precomp_ms = (time.perf_counter() - t0_knn) * 1000.0
+print(f"Offline t=0 k-NN Jet Precomputation: {knn_precomp_ms:.2f} ms | Linear op: {tuple(knn_op_lin.shape)}, Quadratic op: {tuple(knn_op_quad.shape)}")
+
+# Section 1: Numerical approximation fidelity vs. Exact Autodiff on a trained reference MLP
+ref_mlp = MoonsMLP(activation="tanh", seed=7)
+ref_opt = torch.optim.SGD(ref_mlp.parameters(), lr=0.12, momentum=0.9)
+ce_loss_fn = nn.CrossEntropyLoss()
+for _ in range(100):
+    ref_opt.zero_grad()
+    ce_loss_fn(ref_mlp(X_train), y_train).backward()
+    ref_opt.step()
+
+with torch.no_grad():
+    geom_exact_levi = compute_layer_geometry(ref_mlp, X_train, layer_idx=5, metric_mode="graph")
+    g_exact_gauss, K_exact_gauss = compute_fast_graph_geometry(ref_mlp, X_train)
+    g_eucl_exact = compute_layer_pullback_metric(ref_mlp, X_train, layer_idx=5, metric_mode="euclidean", eps=1e-6)
+    lv_exact = 0.5 * torch.log(torch.clamp(torch.linalg.det(g_eucl_exact), min=1e-8))
+
+    h_grid = np.logspace(-6, -1, 16)
+    fd_vol_errs, fd_curv_errs = [], []
+    for h_val in h_grid:
+        g_fd_h = compute_fd_pullback_metric(ref_mlp, X_train, h=float(h_val), metric_mode="euclidean", eps=1e-6)
+        lv_fd_h = 0.5 * torch.log(torch.clamp(torch.linalg.det(g_fd_h), min=1e-8))
+        fd_vol_errs.append((lv_fd_h - lv_exact).abs().mean().item())
+
+        _, K_fd_h = compute_fd_graph_curvature(ref_mlp, X_train, h=float(h_val))
+        fd_curv_errs.append((K_fd_h - K_exact_gauss).abs().mean().item())
+
+    _, K_fd_opt = compute_fd_graph_curvature(ref_mlp, X_train, h=2e-3)
+    _, K_knn_est = compute_knn_jet_geometry(ref_mlp, X_train, knn_idx_quad, knn_op_quad, metric_mode="graph")
+
+print(f"Approach 4 (Gauss Eq.) max |K_gauss - K_levi_civita| : {(K_exact_gauss - geom_exact_levi['K']).abs().max().item():.2e}")
+print(f"Approach 1 (7-pt FD, h=2e-3) mean |K_fd - K_exact|   : {(K_fd_opt - K_exact_gauss).abs().mean().item():.2e}")
+print(f"Approach 2 (1N k-NN Jet) Pearson r(K_knn, K_exact)   : {np.corrcoef(K_knn_est.numpy(), K_exact_gauss.numpy())[0, 1]:.4f}")
+
+fig, axes = plt.subplots(1, 2, figsize=(13.2, 4.3))
+axes[0].plot(h_grid, fd_vol_errs, "o-", lw=2.0, color="#1f77b4", label=r"Approach 1: 3-pt Forward FD $|\Delta \log\sqrt{\det g}|$ ($O(h)$)")
+axes[0].plot(h_grid, fd_curv_errs, "s-", lw=2.0, color="#d62728", label=r"Approach 1: 7-pt Central FD $|\Delta K^{(5)}|$ ($O(h^2)$)")
+axes[0].set_xscale("log")
+axes[0].set_yscale("log")
+axes[0].set_xlabel(r"Finite-Difference Step Size $h$")
+axes[0].set_ylabel("Mean Absolute Approximation Error")
+axes[0].set_title("Stencil Truncation vs. Floating-Point Roundoff Scaling")
+axes[0].legend(fontsize=8.3)
+axes[0].grid(alpha=0.3, which="both")
+
+axes[1].scatter(np.arcsinh(K_exact_gauss.numpy()), np.arcsinh(K_fd_opt.numpy()), s=20, alpha=0.75, color="#2ca02c", label="Approach 1: 7-pt FD Stencil ($h=2\\times 10^{-3}$)")
+axes[1].scatter(np.arcsinh(K_exact_gauss.numpy()), np.arcsinh(K_knn_est.numpy()), s=20, alpha=0.65, color="#ff7f0e", marker="^", label="Approach 2: 1N Point-Cloud $k$-NN Jet")
+lim_v = max(np.abs(np.arcsinh(K_exact_gauss.numpy())).max() * 1.1, 1.0)
+axes[1].plot([-lim_v, lim_v], [-lim_v, lim_v], "k--", lw=1.4, label="Exact Identity $y = x$")
+axes[1].set_xlabel(r"Exact Analytical $\mathrm{arcsinh}(K^{(5)}(x))$")
+axes[1].set_ylabel(r"1st-Order Approximated $\mathrm{arcsinh}(\hat{K}^{(5)}(x))$")
+axes[1].set_title("Pointwise Curvature Fidelity on Trained Network")
+axes[1].legend(fontsize=8.3)
+axes[1].grid(alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+""",
+        },
+        {
+            "type": "markdown",
+            "source": r"""
+## 2. Step-Level Compute, Memory & Autograd Graph Benchmark (vs. `SGD` Cross-Entropy Baseline)
+
+We benchmark a complete **forward + backward + `SGD.step()`** iteration (`N = 220` points on `[2 -> 5 -> 10 -> 15 -> 10 -> 2]`) across **14 configurations**, anchored by **`SGD + Cross-Entropy`** (`1st-Order` reference):
+- **Step Latency (`ms / step`)** averaged over 25 timed `SGD` iterations.
+- **CPU Tensor Memory Allocated (`MB / step`)** captured via `torch.profiler.profile(..., profile_memory=True)`.
+- **Autograd Computation Graph Size (`# grad_fn nodes`)** retained for reverse-mode backpropagation.
+""",
+        },
+        {
+            "type": "code",
+            "source": r"""
+def count_autograd_nodes(grad_fn) -> int:
+    visited = set()
+    stack = [grad_fn]
+    while stack:
+        node = stack.pop()
+        if node is None or node in visited:
+            continue
+        visited.add(node)
+        for nxt, _ in getattr(node, "next_functions", []):
+            stack.append(nxt)
+    return len(visited)
+
+
+def benchmark_sgd_step(loss_fn, model: MoonsMLP, n_repeats: int = 25):
+    sgd = torch.optim.SGD(model.parameters(), lr=1e-4)
+
+    # Warmup & count autograd graph nodes
+    sgd.zero_grad()
+    l_warm = loss_fn()
+    n_nodes = count_autograd_nodes(l_warm.grad_fn)
+    l_warm.backward()
+    sgd.step()
+
+    # Profile tensor memory allocated during one full SGD step
+    with profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof:
+        sgd.zero_grad()
+        l_mem = loss_fn()
+        l_mem.backward()
+        sgd.step()
+    mem_mb = sum(e.cpu_memory_usage for e in prof.key_averages() if e.cpu_memory_usage > 0) / (1024.0 * 1024.0)
+
+    # Time repeated SGD steps
+    t0 = time.perf_counter()
+    for _ in range(n_repeats):
+        sgd.zero_grad()
+        l_run = loss_fn()
+        l_run.backward()
+        sgd.step()
+    step_ms = (time.perf_counter() - t0) * 1000.0 / n_repeats
+    return step_ms, mem_mb, n_nodes
+
+
+bench_net = MoonsMLP(activation="tanh", seed=7)
+rng_probe = torch.Generator().manual_seed(42)
+
+BENCHMARK_SUITE = [
+    # (Group, Label, Order, BatchMult, LossBuilder, Color)
+    ("Baseline", "SGD + Cross-Entropy", "1st", "1N", lambda: ce_loss_fn(bench_net(X_train), y_train), "#111111"),
+    # Volume-Element Loss
+    ("Volume", "Vol: Exact 2nd-Order Autodiff", "2nd", "jacrev", lambda: volume_contrastive_loss(compute_layer_pullback_metric(bench_net, X_train, 5, "euclidean", 1e-6, params=dict(bench_net.named_parameters())), y_train, 0.60)[0], "#8c564b"),
+    ("Volume", "Vol: App1 (3-pt FD Stencil)", "1st", "3N", lambda: volume_contrastive_loss(compute_fd_pullback_metric(bench_net, X_train, metric_mode="euclidean"), y_train, 0.60)[0], "#1f77b4"),
+    ("Volume", "Vol: App2 (1N k-NN Linear)", "1st", "1N", lambda: volume_contrastive_loss(compute_knn_jet_geometry(bench_net, X_train, knn_idx_lin, knn_op_lin, metric_mode="euclidean")[0], y_train, 0.60)[0], "#2ca02c"),
+    ("Volume", "Vol: App3 (2-Probe Sketch)", "1st", "3N", lambda: volume_contrastive_loss(compute_sketched_pullback_metric(bench_net, X_train, n_probes=2, metric_mode="euclidean", generator=rng_probe)[0], y_train, 0.60)[0], "#9467bd"),
+    # Metric Anisotropy Loss
+    ("Anisotropy", "Aniso: Exact 2nd-Order Autodiff", "2nd", "jacrev", lambda: anisotropy_margin_loss(compute_layer_pullback_metric(bench_net, X_train, 5, "graph", params=dict(bench_net.named_parameters())), y_train, 0.45)[0], "#8c564b"),
+    ("Anisotropy", "Aniso: App1 (3-pt FD Stencil)", "1st", "3N", lambda: anisotropy_margin_loss(compute_fd_pullback_metric(bench_net, X_train, metric_mode="graph"), y_train, 0.45)[0], "#1f77b4"),
+    ("Anisotropy", "Aniso: App2 (1N k-NN Linear)", "1st", "1N", lambda: anisotropy_margin_loss(compute_knn_jet_geometry(bench_net, X_train, knn_idx_lin, knn_op_lin, metric_mode="graph")[0], y_train, 0.45)[0], "#2ca02c"),
+    ("Anisotropy", "Aniso: App3 (1-Probe Hutch.)", "1st", "2N", lambda: anisotropy_margin_loss(compute_sketched_pullback_metric(bench_net, X_train, n_probes=1, metric_mode="graph", generator=rng_probe)[0], y_train, 0.45)[0], "#9467bd"),
+    # Gaussian Curvature Loss
+    ("Curvature", "Curv: Exact 3rd-Order (Levi-Civ.)", "3rd", "jacrev^3", lambda: (lambda g: curvature_margin_loss(g["K"], y_train, g["g"], margin=0.40)[0])(compute_layer_geometry(bench_net, X_train, 5, "graph", params=dict(bench_net.named_parameters()))), "#d62728"),
+    ("Curvature", "Curv: App4 (Exact Gauss Eq.)", "3rd", "jacfwd^2", lambda: (lambda gK: curvature_margin_loss(gK[1], y_train, gK[0], margin=0.40)[0])(compute_fast_graph_geometry(bench_net, X_train, params=dict(bench_net.named_parameters()))), "#ff7f0e"),
+    ("Curvature", "Curv: App1 (7-pt FD Stencil)", "1st", "7N", lambda: (lambda gK: curvature_margin_loss(gK[1], y_train, gK[0], margin=0.40)[0])(compute_fd_graph_curvature(bench_net, X_train)), "#1f77b4"),
+    ("Curvature", "Curv: App2 (1N k-NN Quad Jet)", "1st", "1N", lambda: (lambda gK: curvature_margin_loss(gK[1], y_train, gK[0], margin=0.40)[0])(compute_knn_jet_geometry(bench_net, X_train, knn_idx_quad, knn_op_quad, metric_mode="graph")), "#2ca02c"),
+    ("Curvature", "Curv: App3 (Random 2-Plane)", "1st", "7N", lambda: (lambda gK: curvature_margin_loss(gK[1], y_train, gK[0], margin=0.40)[0])(compute_sketched_plane_curvature(bench_net, X_train, generator=rng_probe)), "#9467bd"),
+]
+
+bench_records = []
+for grp, lbl, order_str, bmult, fn, col in BENCHMARK_SUITE:
+    ms, mb, nodes = benchmark_sgd_step(fn, bench_net)
+    bench_records.append({
+        "group": grp,
+        "label": lbl,
+        "order": order_str,
+        "batch": bmult,
+        "ms": ms,
+        "mb": mb,
+        "nodes": nodes,
+        "color": col,
+    })
+
+exact_ref_by_group = {
+    "Baseline": bench_records[0],
+    "Volume": bench_records[1],
+    "Anisotropy": bench_records[5],
+    "Curvature": bench_records[9],
+}
+
+print(f"{'Method':<34} | {'Order':^5} | {'Evals':^8} | {'Latency (ms)':>12} | {'Speedup':>8} | {'Memory (MB)':>11} | {'Mem Save':>9} | {'Nodes':>6}")
+print("-" * 114)
+for rec in bench_records:
+    ref = exact_ref_by_group[rec["group"]]
+    sp = ref["ms"] / rec["ms"]
+    msave = ref["mb"] / rec["mb"]
+    print(
+        f"{rec['label']:<34} | {rec['order']:^5} | {rec['batch']:^8} | {rec['ms']:12.2f} | {sp:7.1f}x | "
+        f"{rec['mb']:11.2f} | {msave:8.1f}x | {rec['nodes']:6d}"
+    )
+
+# Visualize Curvature + Volume + SGD-CE Compute & Memory Pareto Comparison
+plot_subset = [bench_records[i] for i in [0, 1, 2, 3, 9, 10, 11, 12, 13]]
+short_labels = [
+    "SGD + CE\n(1st, 1N)",
+    "Vol Exact\n(2nd)",
+    "Vol App1\nFD (1st)",
+    "Vol App2\nkNN (1st)",
+    "Curv Exact\nLevi (3rd)",
+    "Curv App4\nGauss (3rd)",
+    "Curv App1\n7pt FD (1st)",
+    "Curv App2\n1N kNN (1st)",
+    "Curv App3\nSketch (1st)",
+]
+
+fig, axes = plt.subplots(1, 3, figsize=(17.2, 4.8))
+y_idx = np.arange(len(plot_subset))
+cols_sub = [r["color"] for r in plot_subset]
+ms_sub = [r["ms"] for r in plot_subset]
+mb_sub = [r["mb"] for r in plot_subset]
+
+# Panel 1: Step Latency
+bars0 = axes[0].barh(y_idx, ms_sub, color=cols_sub, edgecolor="k", alpha=0.88, height=0.65)
+axes[0].set_xscale("log")
+axes[0].set_yticks(y_idx)
+axes[0].set_yticklabels(short_labels, fontsize=8.5)
+axes[0].invert_yaxis()
+axes[0].set_xlabel("Step Latency (ms / SGD step, log scale)")
+axes[0].set_title("Compute Cost per Training Step")
+axes[0].set_xlim(0.4, max(ms_sub) * 3.2)
+axes[0].grid(axis="x", alpha=0.3, which="both")
+for b, v in zip(bars0, ms_sub):
+    axes[0].text(v * 1.12, b.get_y() + b.get_height() / 2, f"{v:.2f} ms", va="center", fontsize=8, fontweight="bold")
+
+# Panel 2: Step Memory
+bars1 = axes[1].barh(y_idx, mb_sub, color=cols_sub, edgecolor="k", alpha=0.88, height=0.65)
+axes[1].set_xscale("log")
+axes[1].set_yticks(y_idx)
+axes[1].set_yticklabels([""] * len(plot_subset))
+axes[1].invert_yaxis()
+axes[1].set_xlabel("CPU Tensor Memory (MB / SGD step, log scale)")
+axes[1].set_title("Memory Footprint per Training Step")
+axes[1].set_xlim(0.2, max(mb_sub) * 4.0)
+axes[1].grid(axis="x", alpha=0.3, which="both")
+for b, v in zip(bars1, mb_sub):
+    axes[1].text(v * 1.12, b.get_y() + b.get_height() / 2, f"{v:.2f} MB", va="center", fontsize=8, fontweight="bold")
+
+# Panel 3: Compute vs Memory Pareto Frontier
+for rec in bench_records:
+    marker = "*" if rec["group"] == "Baseline" else ("D" if rec["order"] != "1st" else "o")
+    sz = 220 if rec["group"] == "Baseline" else max(rec["nodes"] * 0.22, 65)
+    axes[2].scatter(rec["ms"], rec["mb"], s=sz, c=rec["color"], marker=marker, edgecolors="k", lw=1.2, alpha=0.88)
+
+for i in [0, 1, 3, 9, 10, 11, 12]:
+    r = bench_records[i]
+    axes[2].annotate(r["label"].replace("Curv: ", "").replace("Vol: ", ""), (r["ms"], r["mb"]), textcoords="offset points", xytext=(6, 4), fontsize=7.8)
+
+axes[2].set_xscale("log")
+axes[2].set_yscale("log")
+axes[2].set_xlabel("Step Latency (ms / step, log scale)")
+axes[2].set_ylabel("Step Memory (MB / step, log scale)")
+axes[2].set_title("Compute–Memory Pareto Frontier vs. SGD + CE")
+axes[2].set_xlim(0.5, max(ms_sub) * 4.5)
+axes[2].set_ylim(0.25, max(mb_sub) * 3.0)
+axes[2].grid(alpha=0.3, which="both")
+
+plt.suptitle("Approaching First-Order SGD Efficiency: Compute, Memory, and Graph Scaling Across Approaches 1–4", y=1.03, fontsize=13)
+plt.tight_layout()
+plt.show()
+""",
+        },
+        {
+            "type": "markdown",
+            "source": r"""
+## 3. End-to-End `SGD` Training Convergence & Exact Analytical Test Accuracy
+
+A critical validation question is whether networks trained *exclusively* using 1st-order spatial approximations genuinely sculpt the **exact continuous differential geometry** of the manifold.
+
+Below we train **every method using `torch.optim.SGD` (`momentum = 0.9`)** from the same initialization (`seed = 7`) alongside the **`SGD + Cross-Entropy` baseline**, and evaluate held-out test accuracy at every checkpoint using the **exact analytical differential-geometric operators** (`compute_layer_pullback_metric` and `compute_fast_graph_geometry`).
+""",
+        },
+        {
+            "type": "code",
+            "source": r"""
+def exact_test_accuracy(mdl: MoonsMLP, task: str) -> float:
+    with torch.no_grad():
+        if task == "ce":
+            return (mdl(X_test).argmax(dim=-1) == y_test).float().mean().item() * 100.0
+        if task == "volume":
+            g = compute_layer_pullback_metric(mdl, X_test, layer_idx=5, metric_mode="euclidean", eps=1e-6)
+            lv = 0.5 * torch.log(torch.clamp(torch.linalg.det(g), min=1e-8))
+            return ((lv > 0.0).long() == y_test).float().mean().item() * 100.0
+        if task == "anisotropy":
+            g = compute_layer_pullback_metric(mdl, X_test, layer_idx=5, metric_mode="graph")
+            lr = torch.log(torch.clamp(g[:, 0, 0], min=1e-8) / torch.clamp(g[:, 1, 1], min=1e-8))
+            return ((lr > 0.0).long() == y_test).float().mean().item() * 100.0
+        if task == "curvature":
+            _, K = compute_fast_graph_geometry(mdl, X_test)
+            return ((K > 0.0).long() == y_test).float().mean().item() * 100.0
+    raise ValueError(task)
+
+
+def run_sgd_training(task: str, approx_mode: str, epochs: int = 120, lr: float = 0.06, seed: int = 7):
+    mdl = MoonsMLP(layer_dims=(2, 5, 10, 15, 10, 2), activation="tanh", seed=seed)
+    opt = torch.optim.SGD(mdl.parameters(), lr=lr, momentum=0.9)
+    rng = torch.Generator().manual_seed(seed + 100)
+
+    eval_epochs, acc_curve, time_ms_curve, loss_curve = [0], [exact_test_accuracy(mdl, task)], [0.0], []
+    elapsed_train_ms = 0.0
+
+    for ep in range(1, epochs + 1):
+        t0 = time.perf_counter()
+        opt.zero_grad()
+
+        if task == "ce":
+            loss = ce_loss_fn(mdl(X_train), y_train)
+        elif task == "volume":
+            if approx_mode == "exact":
+                g = compute_layer_pullback_metric(mdl, X_train, 5, "euclidean", 1e-6, params=dict(mdl.named_parameters()))
+            elif approx_mode == "app1_fd":
+                g = compute_fd_pullback_metric(mdl, X_train, metric_mode="euclidean")
+            elif approx_mode == "app2_knn":
+                g, _ = compute_knn_jet_geometry(mdl, X_train, knn_idx_lin, knn_op_lin, metric_mode="euclidean")
+            elif approx_mode == "app3_sketch":
+                g, _ = compute_sketched_pullback_metric(mdl, X_train, n_probes=2, metric_mode="euclidean", generator=rng)
+            loss, _ = volume_contrastive_loss(g, y_train, margin=0.60)
+        elif task == "anisotropy":
+            if approx_mode == "exact":
+                g = compute_layer_pullback_metric(mdl, X_train, 5, "graph", params=dict(mdl.named_parameters()))
+            elif approx_mode == "app1_fd":
+                g = compute_fd_pullback_metric(mdl, X_train, metric_mode="graph")
+            elif approx_mode == "app2_knn":
+                g, _ = compute_knn_jet_geometry(mdl, X_train, knn_idx_lin, knn_op_lin, metric_mode="graph")
+            elif approx_mode == "app3_sketch":
+                g, _ = compute_sketched_pullback_metric(mdl, X_train, n_probes=1, metric_mode="graph", generator=rng)
+            loss, _ = anisotropy_margin_loss(g, y_train, margin=0.45)
+        elif task == "curvature":
+            if approx_mode == "exact_levi":
+                gm = compute_layer_geometry(mdl, X_train, 5, "graph", params=dict(mdl.named_parameters()))
+                g, K = gm["g"], gm["K"]
+            elif approx_mode == "app4_gauss":
+                g, K = compute_fast_graph_geometry(mdl, X_train, params=dict(mdl.named_parameters()))
+            elif approx_mode == "app1_fd":
+                g, K = compute_fd_graph_curvature(mdl, X_train)
+            elif approx_mode == "app2_knn":
+                g, K = compute_knn_jet_geometry(mdl, X_train, knn_idx_quad, knn_op_quad, metric_mode="graph")
+            elif approx_mode == "app3_sketch":
+                g, K = compute_sketched_plane_curvature(mdl, X_train, generator=rng)
+            loss, _ = curvature_margin_loss(K, y_train, g, margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0)
+        else:
+            raise ValueError(task)
+
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(mdl.parameters(), max_norm=5.0)
+        opt.step()
+        elapsed_train_ms += (time.perf_counter() - t0) * 1000.0
+        loss_curve.append(loss.item())
+
+        if ep % 10 == 0 or ep == epochs:
+            eval_epochs.append(ep)
+            acc_curve.append(exact_test_accuracy(mdl, task))
+            time_ms_curve.append(elapsed_train_ms)
+
+    return mdl, {
+        "epochs": eval_epochs,
+        "acc": acc_curve,
+        "time_ms": time_ms_curve,
+        "final_loss": loss_curve[-1],
+        "total_ms": elapsed_train_ms,
+    }
+
+
+N_EPOCHS = 120
+ce_mdl, ce_hist = run_sgd_training("ce", "exact", epochs=N_EPOCHS, lr=0.12)
+
+TRAINING_MATRIX = {
+    "volume": [
+        ("exact", "Exact 2nd-Order Autodiff", 0.06, "#8c564b", "--"),
+        ("app1_fd", "App 1: 3-pt FD Stencil (1st)", 0.06, "#1f77b4", "-"),
+        ("app2_knn", "App 2: 1N k-NN Linear (1st)", 0.025, "#2ca02c", "-"),
+        ("app3_sketch", "App 3: Random 2-Probe (1st)", 0.06, "#9467bd", "-."),
+    ],
+    "anisotropy": [
+        ("exact", "Exact 2nd-Order Autodiff", 0.08, "#8c564b", "--"),
+        ("app1_fd", "App 1: 3-pt FD Stencil (1st)", 0.08, "#1f77b4", "-"),
+        ("app2_knn", "App 2: 1N k-NN Linear (1st)", 0.08, "#2ca02c", "-"),
+        ("app3_sketch", "App 3: 1-Probe Hutch. (1st)", 0.08, "#9467bd", "-."),
+    ],
+    "curvature": [
+        ("exact_levi", "Exact 3rd-Order (Levi-Civita)", 0.045, "#d62728", ":"),
+        ("app4_gauss", "App 4: Exact Gauss Eq. (3rd)", 0.045, "#ff7f0e", "--"),
+        ("app1_fd", "App 1: 7-pt FD Stencil (1st)", 0.045, "#1f77b4", "-"),
+        ("app2_knn", "App 2: 1N k-NN Quad Jet (1st)", 0.035, "#2ca02c", "-"),
+        ("app3_sketch", "App 3: Random 2-Plane (1st)", 0.045, "#9467bd", "-."),
+    ],
+}
+
+trained_models = {t: {} for t in TRAINING_MATRIX}
+print(f"{'Task & Training Method (All via SGD)':<44} | {'Train Time (ms)':>15} | {'vs SGD+CE Time':>14} | {'Exact Analytical Test Acc':>25}")
+print("-" * 108)
+print(f"{'Baseline: SGD + Cross-Entropy (1st-Order)':<44} | {ce_hist['total_ms']:15.1f} | {'1.00x':>14} | {ce_hist['acc'][-1]:24.2f}%")
+print("-" * 108)
+
+for t_name, specs in TRAINING_MATRIX.items():
+    for mode_key, label, lr_val, col, ls in specs:
+        m_tr, h_tr = run_sgd_training(t_name, mode_key, epochs=N_EPOCHS, lr=lr_val)
+        trained_models[t_name][mode_key] = (m_tr, h_tr, label, col, ls)
+        rel_time = h_tr["total_ms"] / ce_hist["total_ms"]
+        print(f"{f'{t_name.capitalize()} — {label}':<44} | {h_tr['total_ms']:15.1f} | {f'{rel_time:.2f}x':>14} | {h_tr['acc'][-1]:24.2f}%")
+    print("-" * 108)
+
+# Plot 2x3 Grid: Row 0 = Test Acc vs Epoch; Row 1 = Test Acc vs Wall-Clock Time (ms, log scale)
+fig, axes = plt.subplots(2, 3, figsize=(17.0, 7.8))
+task_titles = {
+    "volume": r"Volume-Element ($\log\sqrt{\det g^{(5)}} > 0$)",
+    "anisotropy": r"Metric Anisotropy ($\log(\tilde{g}_{11}/\tilde{g}_{22}) > 0$)",
+    "curvature": r"Gaussian Curvature ($K^{(5)} > 0$)",
+}
+
+for col_idx, t_name in enumerate(["volume", "anisotropy", "curvature"]):
+    # Reference SGD + Cross-Entropy curve
+    axes[0, col_idx].plot(ce_hist["epochs"], ce_hist["acc"], "k:", lw=2.0, label="Baseline: SGD + Cross-Entropy")
+    axes[1, col_idx].plot(np.maximum(ce_hist["time_ms"], 1.0), ce_hist["acc"], "k:", lw=2.0, label="Baseline: SGD + Cross-Entropy")
+
+    for mode_key, (_, h_tr, label, col, ls) in trained_models[t_name].items():
+        axes[0, col_idx].plot(h_tr["epochs"], h_tr["acc"], color=col, ls=ls, lw=2.1, label=label)
+        axes[1, col_idx].plot(np.maximum(h_tr["time_ms"], 1.0), h_tr["acc"], color=col, ls=ls, lw=2.1, label=label)
+
+    axes[0, col_idx].set_title(task_titles[t_name])
+    axes[0, col_idx].set_xlabel("SGD Training Epoch")
+    axes[0, col_idx].set_ylim(38.0, 102.5)
+    axes[0, col_idx].grid(alpha=0.3)
+    axes[0, col_idx].legend(fontsize=7.6, loc="lower right")
+
+    axes[1, col_idx].set_xscale("log")
+    axes[1, col_idx].set_xlabel("Cumulative Wall-Clock Training Time (ms, log scale)")
+    axes[1, col_idx].set_ylim(38.0, 102.5)
+    axes[1, col_idx].grid(alpha=0.3, which="both")
+
+axes[0, 0].set_ylabel("Exact Analytical Test Accuracy (%)")
+axes[1, 0].set_ylabel("Exact Analytical Test Accuracy (%)")
+plt.suptitle("End-to-End SGD Convergence by Epoch (Top) and Wall-Clock Compute Time (Bottom)", y=1.02, fontsize=13)
+plt.tight_layout()
+plt.show()
+""",
+        },
+        {
+            "type": "markdown",
+            "source": r"""
+## 4. Exact Analytical Decision Landscapes Learned via 1st-Order Approximations
+
+To confirm visually that models trained purely with 1st-order stencils, `1N` $k$-NN jets, and randomized tangent sketches learn genuine smooth differential-geometric fields (without high-frequency artifacts), we evaluate the **exact analytical** log-volume field $\log\sqrt{\det g^{(5)}(x)}$ (Row 0) and **exact analytical** Gaussian curvature $\mathrm{arcsinh}(K^{(5)}(x))$ (Row 1) across the ambient 2D plane.
+""",
+        },
+        {
+            "type": "code",
+            "source": r"""
+fig, axes = plt.subplots(2, 4, figsize=(17.0, 7.6), sharex=True, sharey=True)
+
+vol_cols = [
+    ("exact", "Exact 2nd-Order Autodiff"),
+    ("app1_fd", "App 1: 3-pt FD Stencil (1st)"),
+    ("app2_knn", "App 2: 1N k-NN Linear (1st)"),
+    ("app3_sketch", "App 3: Random 2-Probe (1st)"),
+]
+curv_cols = [
+    ("app4_gauss", "App 4: Exact Gauss Eq. (3rd)"),
+    ("app1_fd", "App 1: 7-pt FD Stencil (1st)"),
+    ("app2_knn", "App 2: 1N k-NN Quad Jet (1st)"),
+    ("app3_sketch", "App 3: Random 2-Plane (1st)"),
+]
+
+for c_idx, (m_key, c_title) in enumerate(vol_cols):
+    mdl, h_tr, _, _, _ = trained_models["volume"][m_key]
+    with torch.no_grad():
+        g_grid = compute_layer_pullback_metric(mdl, grid_pts, layer_idx=5, metric_mode="euclidean", eps=1e-6)
+        fld = (0.5 * torch.log(torch.clamp(torch.linalg.det(g_grid), min=1e-8))).numpy().reshape(xx.shape)
+    vm = float(max(np.percentile(np.abs(fld), 96), 0.25))
+    im = axes[0, c_idx].contourf(xx, yy, fld, levels=np.linspace(-vm, vm, 25), cmap="RdBu_r", norm=TwoSlopeNorm(vmin=-vm, vcenter=0.0, vmax=vm), extend="both")
+    if fld.min() < 0.0 < fld.max():
+        axes[0, c_idx].contour(xx, yy, fld, levels=[0.0], colors="k", linewidths=1.8)
+    axes[0, c_idx].scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", edgecolors="w", s=18)
+    axes[0, c_idx].scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", edgecolors="w", s=18)
+    axes[0, c_idx].set_title(f"{c_title}\nExact Acc: {h_tr['acc'][-1]:.1f}% ({h_tr['total_ms']:.0f} ms)", fontsize=9.5)
+    plt.colorbar(im, ax=axes[0, c_idx], fraction=0.046)
+
+for c_idx, (m_key, c_title) in enumerate(curv_cols):
+    mdl, h_tr, _, _, _ = trained_models["curvature"][m_key]
+    with torch.no_grad():
+        _, K_grid = compute_fast_graph_geometry(mdl, grid_pts)
+        fld = np.arcsinh(K_grid.numpy()).reshape(xx.shape)
+    vm = float(max(np.percentile(np.abs(fld), 96), 0.25))
+    im = axes[1, c_idx].contourf(xx, yy, fld, levels=np.linspace(-vm, vm, 25), cmap="RdBu_r", norm=TwoSlopeNorm(vmin=-vm, vcenter=0.0, vmax=vm), extend="both")
+    if fld.min() < 0.0 < fld.max():
+        axes[1, c_idx].contour(xx, yy, fld, levels=[0.0], colors="k", linewidths=1.8)
+    axes[1, c_idx].scatter(X_test[y_test == 0, 0], X_test[y_test == 0, 1], c="#1f77b4", edgecolors="w", s=18)
+    axes[1, c_idx].scatter(X_test[y_test == 1, 0], X_test[y_test == 1, 1], c="#d62728", edgecolors="w", s=18)
+    axes[1, c_idx].set_title(f"{c_title}\nExact Acc: {h_tr['acc'][-1]:.1f}% ({h_tr['total_ms']:.0f} ms)", fontsize=9.5)
+    axes[1, c_idx].set_xlabel("$x^1$")
+    plt.colorbar(im, ax=axes[1, c_idx], fraction=0.046)
+
+axes[0, 0].set_ylabel("Exact Log Volume\n" + r"$\log\sqrt{\det g^{(5)}(x)}$" + "\n$x^2$")
+axes[1, 0].set_ylabel("Exact Curvature\n" + r"$\mathrm{arcsinh}(K^{(5)}(x))$" + "\n$x^2$")
+plt.suptitle("Exact Analytical Geometric Landscapes Learned via Exact vs. First-Order Approximated SGD Training", y=1.02, fontsize=13)
+plt.tight_layout()
+plt.show()
+""",
+        },
+        {
+            "type": "markdown",
+            "source": r"""
+## 5. High-Dimensional Input Scaling ($d_0 = 2 \to 128$): Why Randomized Tangent Sketching Wins
+
+On 2D inputs (`make_moons`, $d_0 = 2$), coordinate finite-difference stencils require only `3N` or `7N` forward evaluations. In high-dimensional input spaces ($d_0 \gg 2$), however:
+- **Exact Pullback Autodiff** (`jacrev`/`jacfwd` wrt $x \in \mathbb{R}^{d_0}$) and **Full Coordinate FD Stencils** (`(d_0 + 1)N` evaluations) grow linearly or quadratically with $d_0$.
+- **Approach 3 (Randomized Tangent-Plane Sketching)** evaluates `2N` (1-probe trace/metric) or `7N` (random 2-plane sectional curvature) points **regardless of $d_0$**, remaining parallel to `SGD + Cross-Entropy` across arbitrary input dimensions!
+""",
+        },
+        {
+            "type": "code",
+            "source": r"""
+dims_to_test = [2, 4, 8, 16, 32, 64, 128]
+N_hd = 128
+scaling_res = {
+    "SGD + Cross-Entropy": {"ms": [], "mb": [], "col": "#111111", "ls": ":"},
+    "Exact Metric Autodiff (2nd)": {"ms": [], "mb": [], "col": "#d62728", "ls": "--"},
+    "App 1: Full Coord FD ((d0+1)N)": {"ms": [], "mb": [], "col": "#1f77b4", "ls": "-."},
+    "App 3: 1-Probe Metric Sketch (2N)": {"ms": [], "mb": [], "col": "#2ca02c", "ls": "-"},
+    "App 3: Random 2-Plane Curv. (7N)": {"ms": [], "mb": [], "col": "#9467bd", "ls": "-"},
+}
+
+rng_hd = torch.Generator().manual_seed(77)
+for d0 in dims_to_test:
+    X_hd = torch.randn(N_hd, d0, dtype=torch.float64)
+    y_hd = torch.randint(0, 2, (N_hd,))
+    signs_hd = 2.0 * y_hd.to(torch.float64) - 1.0
+    mlp_hd = MoonsMLP(layer_dims=(d0, 16, 16, 2), activation="tanh", seed=7)
+
+    # 1. SGD + Cross-Entropy
+    ms, mb, _ = benchmark_sgd_step(lambda: ce_loss_fn(mlp_hd(X_hd), y_hd), mlp_hd, n_repeats=12)
+    scaling_res["SGD + Cross-Entropy"]["ms"].append(ms)
+    scaling_res["SGD + Cross-Entropy"]["mb"].append(mb)
+
+    # 2. Exact 2nd-order metric trace margin loss
+    def exact_hd_loss():
+        g = compute_layer_pullback_metric(mlp_hd, X_hd, layer_idx=3, metric_mode="euclidean", eps=1e-6, params=dict(mlp_hd.named_parameters()))
+        tr_log = torch.log(torch.clamp(torch.diagonal(g, dim1=-2, dim2=-1).sum(-1) / d0, min=1e-8))
+        return torch.nn.functional.softplus(0.5 - signs_hd * tr_log).mean()
+
+    ms, mb, _ = benchmark_sgd_step(exact_hd_loss, mlp_hd, n_repeats=8)
+    scaling_res["Exact Metric Autodiff (2nd)"]["ms"].append(ms)
+    scaling_res["Exact Metric Autodiff (2nd)"]["mb"].append(mb)
+
+    # 3. Full Coordinate FD Stencil ((d0 + 1)N)
+    def coord_fd_hd_loss():
+        g = compute_fd_pullback_metric(mlp_hd, X_hd, metric_mode="euclidean")
+        tr_log = torch.log(torch.clamp(torch.diagonal(g, dim1=-2, dim2=-1).sum(-1) / d0, min=1e-8))
+        return torch.nn.functional.softplus(0.5 - signs_hd * tr_log).mean()
+
+    ms, mb, _ = benchmark_sgd_step(coord_fd_hd_loss, mlp_hd, n_repeats=8)
+    scaling_res["App 1: Full Coord FD ((d0+1)N)"]["ms"].append(ms)
+    scaling_res["App 1: Full Coord FD ((d0+1)N)"]["mb"].append(mb)
+
+    # 4. Approach 3: 1-Probe Hutchinson Metric Sketch (2N)
+    def sketch1_hd_loss():
+        _, g_sub = compute_sketched_pullback_metric(mlp_hd, X_hd, n_probes=1, metric_mode="euclidean", generator=rng_hd)
+        tr_log = torch.log(torch.clamp(g_sub[:, 0, 0], min=1e-8))
+        return torch.nn.functional.softplus(0.5 - signs_hd * tr_log).mean()
+
+    ms, mb, _ = benchmark_sgd_step(sketch1_hd_loss, mlp_hd, n_repeats=12)
+    scaling_res["App 3: 1-Probe Metric Sketch (2N)"]["ms"].append(ms)
+    scaling_res["App 3: 1-Probe Metric Sketch (2N)"]["mb"].append(mb)
+
+    # 5. Approach 3: Random 2-Plane Sectional Curvature (7N)
+    def sketch_curv_hd_loss():
+        g_p, K_p = compute_sketched_plane_curvature(mlp_hd, X_hd, generator=rng_hd)
+        return curvature_margin_loss(K_p, y_hd, g_p, margin=0.40)[0]
+
+    ms, mb, _ = benchmark_sgd_step(sketch_curv_hd_loss, mlp_hd, n_repeats=12)
+    scaling_res["App 3: Random 2-Plane Curv. (7N)"]["ms"].append(ms)
+    scaling_res["App 3: Random 2-Plane Curv. (7N)"]["mb"].append(mb)
+
+print(f"{'d_0':>5} | {'SGD+CE (ms/MB)':>16} | {'Exact 2nd (ms/MB)':>19} | {'Coord FD (ms/MB)':>19} | {'App3 1-Probe (ms/MB)':>21} | {'App3 2-Plane K (ms/MB)':>23}")
+print("-" * 116)
+for i, d0 in enumerate(dims_to_test):
+    print(
+        f"{d0:5d} | "
+        f"{scaling_res['SGD + Cross-Entropy']['ms'][i]:6.2f} / {scaling_res['SGD + Cross-Entropy']['mb'][i]:5.2f} | "
+        f"{scaling_res['Exact Metric Autodiff (2nd)']['ms'][i]:8.2f} / {scaling_res['Exact Metric Autodiff (2nd)']['mb'][i]:6.2f} | "
+        f"{scaling_res['App 1: Full Coord FD ((d0+1)N)']['ms'][i]:8.2f} / {scaling_res['App 1: Full Coord FD ((d0+1)N)']['mb'][i]:6.2f} | "
+        f"{scaling_res['App 3: 1-Probe Metric Sketch (2N)']['ms'][i]:9.2f} / {scaling_res['App 3: 1-Probe Metric Sketch (2N)']['mb'][i]:6.2f} | "
+        f"{scaling_res['App 3: Random 2-Plane Curv. (7N)']['ms'][i]:10.2f} / {scaling_res['App 3: Random 2-Plane Curv. (7N)']['mb'][i]:6.2f}"
+    )
+
+fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.4))
+for name, d in scaling_res.items():
+    axes[0].plot(dims_to_test, d["ms"], "o-", color=d["col"], ls=d["ls"], lw=2.1, label=name)
+    axes[1].plot(dims_to_test, d["mb"], "s-", color=d["col"], ls=d["ls"], lw=2.1, label=name)
+
+for ax, ylabel, title in [
+    (axes[0], "Step Latency (ms / SGD step)", "Compute Scaling vs. Ambient Input Dimension $d_0$"),
+    (axes[1], "Step Memory (MB / SGD step)", "Memory Scaling vs. Ambient Input Dimension $d_0$"),
+]:
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log")
+    ax.set_xticks(dims_to_test)
+    ax.set_xticklabels([str(x) for x in dims_to_test])
+    ax.set_xlabel(r"Input Dimension $d_0$")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(fontsize=8.0)
+    ax.grid(alpha=0.3, which="both")
+
+plt.tight_layout()
+plt.show()
+""",
+        },
+        {
+            "type": "markdown",
+            "source": r"""
+## 6. Matrix-Free Woodbury Coupled Natural Gradient (`O(S^2 P)` + 1st-Order Stencils)
+
+Finally, connecting back to **Notebook 06**, we show how **Coupled Geometric Natural Gradient** can also be accelerated by combining:
+1. **Approach 1 (7-pt 1st-Order FD Curvature Stencil)** for both the gradient and parameter-metric residuals, and
+2. **Subsampled Matrix-Free Woodbury Inversion** (`woodbury_coupled_ngd_direction` on $S = 16$ active points, $R = 4S = 64 \ll P = 422$):
+   $$\big(\lambda I_P + \tfrac{1}{S} U^T U\big)^{-1} g = \frac{1}{\lambda}\!\left(g - U^T (\lambda S I_R + U U^T)^{-1} U g\right)$$
+   which never allocates a $P \times P$ matrix and cuts coupled curvature NGD latency and memory dramatically while preserving fast natural-gradient convergence.
+""",
+        },
+        {
+            "type": "code",
+            "source": r"""
+def compare_dense_vs_woodbury_coupled_ngd(n_steps: int = 35):
+    results_ngd = {}
+    rng_sub = torch.Generator().manual_seed(19)
+
+    for mode, label, col, ls in [
+        ("sgd_fd", "Uncoupled SGD + 7-pt FD (1st)", "#7f7f7f", ":"),
+        ("woodbury_fd", "Woodbury Coupled NGD (S=16, 7-pt FD)", "#1f77b4", "--"),
+        ("dense_exact", "Dense Coupled NGD (N=220, Exact Gauss)", "#2ca02c", "-"),
+    ]:
+        mdl = MoonsMLP(activation="tanh", seed=7)
+        sgd_opt = torch.optim.SGD(mdl.parameters(), lr=0.045, momentum=0.9) if mode == "sgd_fd" else None
+        losses, accs = [], []
+
+        # Profile single step memory
+        with profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof:
+            mdl.zero_grad()
+            if mode == "dense_exact":
+                g_m, K_m = compute_fast_graph_geometry(mdl, X_train, params=dict(mdl.named_parameters()))
+            else:
+                g_m, K_m = compute_fd_graph_curvature(mdl, X_train)
+            l_m, _ = curvature_margin_loss(K_m, y_train, g_m, margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0)
+            l_m.backward()
+            if mode == "dense_exact":
+                _ = compute_coupled_geometric_metric(mdl, X_train, y_train, task="curvature", margin=0.40, damping=0.025)
+            elif mode == "woodbury_fd":
+                gf = torch.cat([p.grad.reshape(-1) if p.grad is not None else torch.zeros(p.numel(), dtype=X_train.dtype) for p in mdl.parameters()])
+                _ = woodbury_coupled_ngd_direction(mdl, X_train[:16], y_train[:16], gf, task="curvature", margin=0.40)
+        mem_mb = sum(e.cpu_memory_usage for e in prof.key_averages() if e.cpu_memory_usage > 0) / (1024.0 * 1024.0)
+
+        # Reset and run timed optimization
+        mdl = MoonsMLP(activation="tanh", seed=7)
+        sgd_opt = torch.optim.SGD(mdl.parameters(), lr=0.045, momentum=0.9) if mode == "sgd_fd" else None
+        t0 = time.perf_counter()
+
+        for _ in range(n_steps):
+            mdl.zero_grad()
+            if mode == "dense_exact":
+                g_tr, K_tr = compute_fast_graph_geometry(mdl, X_train, params=dict(mdl.named_parameters()))
+            else:
+                g_tr, K_tr = compute_fd_graph_curvature(mdl, X_train)
+            loss, _ = curvature_margin_loss(K_tr, y_train, g_tr, margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0)
+            losses.append(loss.item())
+            accs.append(exact_test_accuracy(mdl, "curvature"))
+            loss.backward()
+
+            if mode == "sgd_fd":
+                torch.nn.utils.clip_grad_norm_(mdl.parameters(), 5.0)
+                sgd_opt.step()
+            elif mode == "woodbury_fd":
+                gf = torch.cat([p.grad.reshape(-1) if p.grad is not None else torch.zeros(p.numel(), dtype=X_train.dtype) for p in mdl.parameters()])
+                idx_s = torch.randperm(X_train.shape[0], generator=rng_sub)[:16]
+                nat_d, r_norm = woodbury_coupled_ngd_direction(mdl, X_train[idx_s], y_train[idx_s], gf, task="curvature", margin=0.40, damping=0.03)
+                sc = min(1.0, 0.85 / r_norm)
+                with torch.no_grad():
+                    off = 0
+                    for p in mdl.parameters():
+                        n = p.numel()
+                        p -= (0.26 * sc) * nat_d[off : off + n].reshape(p.shape)
+                        off += n
+            else:
+                gf = torch.cat([p.grad.reshape(-1) if p.grad is not None else torch.zeros(p.numel(), dtype=X_train.dtype) for p in mdl.parameters()])
+                G_d = compute_coupled_geometric_metric(mdl, X_train, y_train, task="curvature", margin=0.40, damping=0.025)
+                nat_d = torch.linalg.solve(G_d, gf)
+                r_norm = torch.sqrt(torch.clamp(nat_d @ (G_d @ nat_d), min=1e-12)).item()
+                sc = min(1.0, 0.85 / r_norm)
+                with torch.no_grad():
+                    off = 0
+                    for p in mdl.parameters():
+                        n = p.numel()
+                        p -= (0.28 * sc) * nat_d[off : off + n].reshape(p.shape)
+                        off += n
+
+        ms_per_step = (time.perf_counter() - t0) * 1000.0 / n_steps
+        accs.append(exact_test_accuracy(mdl, "curvature"))
+        with torch.no_grad():
+            g_f, K_f = compute_fast_graph_geometry(mdl, X_train)
+            losses.append(curvature_margin_loss(K_f, y_train, g_f, margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0)[0].item())
+
+        results_ngd[label] = {"loss": losses, "acc": accs, "ms": ms_per_step, "mb": mem_mb, "col": col, "ls": ls}
+        print(f"{label:<40} | {ms_per_step:7.2f} ms/step | {mem_mb:7.2f} MB/step | Final Loss: {losses[-1]:.4f} | Exact Test Acc: {accs[-1]:6.2f}%")
+
+    return results_ngd
+
+ngd_comp = compare_dense_vs_woodbury_coupled_ngd(n_steps=35)
+
+fig, axes = plt.subplots(1, 2, figsize=(13.0, 4.2))
+for label, d in ngd_comp.items():
+    axes[0].plot(d["loss"], color=d["col"], ls=d["ls"], lw=2.2, label=f"{label} ({d['ms']:.1f} ms, {d['mb']:.1f} MB)")
+    axes[1].plot(d["acc"], color=d["col"], ls=d["ls"], lw=2.2, label=label)
+
+axes[0].set_yscale("log")
+axes[0].set_xlabel("Optimization Step")
+axes[0].set_ylabel("Gaussian Curvature Margin Loss")
+axes[0].set_title("Curvature Loss: Matrix-Free Woodbury vs. Dense Coupled NGD")
+axes[0].legend(fontsize=8.0)
+axes[0].grid(alpha=0.3, which="both")
+
+axes[1].set_xlabel("Optimization Step")
+axes[1].set_ylabel("Exact Analytical Test Accuracy (%)")
+axes[1].set_title("Held-Out Curvature Test Accuracy Trajectory")
+axes[1].set_ylim(45.0, 102.5)
+axes[1].legend(fontsize=8.3)
+axes[1].grid(alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+""",
+        },
+    ]
+    build_and_execute_notebook(ROOT / "notebooks" / "07-evaluating-efficient-training.ipynb", cells)
+
+
 if __name__ == "__main__":
     build_notebook_01()
     build_notebook_02()
     build_notebook_03()
     build_notebook_04()
     build_notebook_05()
+    build_notebook_06()
+    build_notebook_07()
