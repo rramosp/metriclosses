@@ -1,0 +1,26 @@
+# Shared experiment configuration read at the start of all notebooks (01-07)
+
+dataset:
+  # Scikit-learn synthetic dataset generator
+  # Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
+  name: "moons"
+  n_classes: 2
+  params:
+    n_train: 240
+    n_test: 120
+    noise: 0.10
+    seed: 42
+    # Optional generator-specific parameters:
+    # factor: 0.5          # "circles": inner/outer circle scale factor
+    # cluster_std: 0.65    # "blobs": cluster standard deviation
+    # class_sep: 1.25      # "classification": class hypercube separation
+    # cov: 1.0             # "gaussian_quantiles": covariance multiplier
+
+model:
+  # Sequence of integers specifying [input_dim, *hidden_dims, output_dim]
+  layer_dims: [2, 10, 2]
+  # layer_dims: [2, 5, 10, 15, 10, 2]
+  # Activation options:
+  # "tanh", "gelu", "silu", "softplus", "elu", "sigmoid", "sin", "relu", "identity", "softmax", "log_softmax"
+  hidden_activation: "tanh"
+  output_activation: "identity"

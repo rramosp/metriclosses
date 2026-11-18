@@ -32,36 +32,27 @@ From $g^{(\ell)}(x; \theta)$ we extract two fundamental geometric diagnostics:
         {
             "type": "code",
             "source": r"""
-# =============================================================================
-# USER CONFIGURATION
-# =============================================================================
-# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
-#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
-DATASET_NAME = "moons"
-N_CLASSES = 2                  # Number of classes (defaults to 2)
-DATASET_PARAMS = {
-    "n_train": 400,
-    "n_test": 200,
-    "noise": 0.10,             # Noise std (or flip_y for "classification")
-    "seed": 42,
-    # Optional dataset-specific parameters: e.g. factor=0.5 ("circles"),
-    # cluster_std=0.65 ("blobs"), class_sep=1.25 ("classification")
-}
-
-# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
-LAYER_DIMS = [2, 5, 10, 15, 10, 2]
-
-# 3. Activation Functions for Hidden Layers and Output Layer
-#    Options: "tanh", "gelu", "silu", "softplus", "elu", "sigmoid", "sin", "relu", "identity"
-HIDDEN_ACTIVATION = "tanh"
-OUTPUT_ACTIVATION = "identity"
-# =============================================================================
-
 import sys
 from pathlib import Path
-for p in [Path.cwd(), Path.cwd().parent]:
-    if (p / "src" / "geometry.py").exists() and str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+import yaml
+
+PROJECT_ROOT = Path.cwd()
+for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
+    if (p / "src" / "geometry.py").exists():
+        PROJECT_ROOT = p
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+        break
+
+with open(PROJECT_ROOT / "config.yaml", "r") as f:
+    CFG = yaml.safe_load(f)
+
+DATASET_NAME = CFG["dataset"]["name"]
+N_CLASSES = CFG["dataset"].get("n_classes", 2)
+DATASET_PARAMS = dict(CFG["dataset"].get("params", {}))
+LAYER_DIMS = list(CFG["model"]["layer_dims"])
+HIDDEN_ACTIVATION = CFG["model"].get("hidden_activation", "tanh")
+OUTPUT_ACTIVATION = CFG["model"].get("output_activation", "identity")
 
 import copy
 import numpy as np
@@ -330,33 +321,27 @@ $$K^{(\ell)}(x) = \frac{R^{(\ell)}_{1212}(x)}{\det g^{(\ell)}(x)}, \qquad R_{\te
         {
             "type": "code",
             "source": r"""
-# =============================================================================
-# USER CONFIGURATION
-# =============================================================================
-# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
-#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
-DATASET_NAME = "moons"
-N_CLASSES = 2                  # Number of classes (defaults to 2)
-DATASET_PARAMS = {
-    "n_train": 360,
-    "n_test": 180,
-    "noise": 0.10,
-    "seed": 42,
-}
-
-# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
-LAYER_DIMS = [2, 5, 10, 15, 10, 2]
-
-# 3. Activation Functions for Hidden Layers and Output Layer
-HIDDEN_ACTIVATION = "tanh"
-OUTPUT_ACTIVATION = "identity"
-# =============================================================================
-
 import sys
 from pathlib import Path
-for p in [Path.cwd(), Path.cwd().parent]:
-    if (p / "src" / "geometry.py").exists() and str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+import yaml
+
+PROJECT_ROOT = Path.cwd()
+for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
+    if (p / "src" / "geometry.py").exists():
+        PROJECT_ROOT = p
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+        break
+
+with open(PROJECT_ROOT / "config.yaml", "r") as f:
+    CFG = yaml.safe_load(f)
+
+DATASET_NAME = CFG["dataset"]["name"]
+N_CLASSES = CFG["dataset"].get("n_classes", 2)
+DATASET_PARAMS = dict(CFG["dataset"].get("params", {}))
+LAYER_DIMS = list(CFG["model"]["layer_dims"])
+HIDDEN_ACTIVATION = CFG["model"].get("hidden_activation", "tanh")
+OUTPUT_ACTIVATION = CFG["model"].get("output_activation", "identity")
 
 import copy
 import numpy as np
@@ -746,33 +731,27 @@ We further test **Halverson & Ruehle (2023)**'s *Metric Flow* framework by measu
         {
             "type": "code",
             "source": r"""
-# =============================================================================
-# USER CONFIGURATION
-# =============================================================================
-# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
-#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
-DATASET_NAME = "moons"
-N_CLASSES = 2                  # Number of classes (defaults to 2)
-DATASET_PARAMS = {
-    "n_train": 240,
-    "n_test": 120,
-    "noise": 0.10,
-    "seed": 42,
-}
-
-# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
-LAYER_DIMS = [2, 5, 10, 15, 10, 2]
-
-# 3. Activation Functions for Hidden Layers and Output Layer
-HIDDEN_ACTIVATION = "tanh"
-OUTPUT_ACTIVATION = "identity"
-# =============================================================================
-
 import sys
 from pathlib import Path
-for p in [Path.cwd(), Path.cwd().parent]:
-    if (p / "src" / "geometry.py").exists() and str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+import yaml
+
+PROJECT_ROOT = Path.cwd()
+for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
+    if (p / "src" / "geometry.py").exists():
+        PROJECT_ROOT = p
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+        break
+
+with open(PROJECT_ROOT / "config.yaml", "r") as f:
+    CFG = yaml.safe_load(f)
+
+DATASET_NAME = CFG["dataset"]["name"]
+N_CLASSES = CFG["dataset"].get("n_classes", 2)
+DATASET_PARAMS = dict(CFG["dataset"].get("params", {}))
+LAYER_DIMS = list(CFG["model"]["layer_dims"])
+HIDDEN_ACTIVATION = CFG["model"].get("hidden_activation", "tanh")
+OUTPUT_ACTIVATION = CFG["model"].get("output_activation", "identity")
 
 import copy
 import numpy as np
@@ -1087,33 +1066,27 @@ $$\mathcal{L}_{\text{geom}}(\theta) = \frac{1}{N}\sum_{n=1}^N \mathrm{softplus}_
         {
             "type": "code",
             "source": r"""
-# =============================================================================
-# USER CONFIGURATION
-# =============================================================================
-# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
-#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
-DATASET_NAME = "moons"
-N_CLASSES = 2                  # Number of classes (defaults to 2)
-DATASET_PARAMS = {
-    "n_train": 220,
-    "n_test": 120,
-    "noise": 0.10,
-    "seed": 42,
-}
-
-# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
-LAYER_DIMS = [2, 5, 10, 15, 10, 2]
-
-# 3. Activation Functions for Hidden Layers and Output Layer
-HIDDEN_ACTIVATION = "tanh"
-OUTPUT_ACTIVATION = "identity"
-# =============================================================================
-
 import sys
 from pathlib import Path
-for p in [Path.cwd(), Path.cwd().parent]:
-    if (p / "src" / "geometry.py").exists() and str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+import yaml
+
+PROJECT_ROOT = Path.cwd()
+for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
+    if (p / "src" / "geometry.py").exists():
+        PROJECT_ROOT = p
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+        break
+
+with open(PROJECT_ROOT / "config.yaml", "r") as f:
+    CFG = yaml.safe_load(f)
+
+DATASET_NAME = CFG["dataset"]["name"]
+N_CLASSES = CFG["dataset"].get("n_classes", 2)
+DATASET_PARAMS = dict(CFG["dataset"].get("params", {}))
+LAYER_DIMS = list(CFG["model"]["layer_dims"])
+HIDDEN_ACTIVATION = CFG["model"].get("hidden_activation", "tanh")
+OUTPUT_ACTIVATION = CFG["model"].get("output_activation", "identity")
 
 import time
 import numpy as np
@@ -1360,33 +1333,27 @@ Finally, we analyze the **back-reaction on the Parameter Manifold ($\Theta$)**: 
         {
             "type": "code",
             "source": r"""
-# =============================================================================
-# USER CONFIGURATION
-# =============================================================================
-# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
-#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
-DATASET_NAME = "moons"
-N_CLASSES = 2                  # Number of classes (defaults to 2)
-DATASET_PARAMS = {
-    "n_train": 220,
-    "n_test": 120,
-    "noise": 0.10,
-    "seed": 42,
-}
-
-# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
-LAYER_DIMS = [2, 5, 10, 15, 10, 2]
-
-# 3. Activation Functions for Hidden Layers and Output Layer
-HIDDEN_ACTIVATION = "tanh"
-OUTPUT_ACTIVATION = "identity"
-# =============================================================================
-
 import sys
 from pathlib import Path
-for p in [Path.cwd(), Path.cwd().parent]:
-    if (p / "src" / "geometry.py").exists() and str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+import yaml
+
+PROJECT_ROOT = Path.cwd()
+for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
+    if (p / "src" / "geometry.py").exists():
+        PROJECT_ROOT = p
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+        break
+
+with open(PROJECT_ROOT / "config.yaml", "r") as f:
+    CFG = yaml.safe_load(f)
+
+DATASET_NAME = CFG["dataset"]["name"]
+N_CLASSES = CFG["dataset"].get("n_classes", 2)
+DATASET_PARAMS = dict(CFG["dataset"].get("params", {}))
+LAYER_DIMS = list(CFG["model"]["layer_dims"])
+HIDDEN_ACTIVATION = CFG["model"].get("hidden_activation", "tanh")
+OUTPUT_ACTIVATION = CFG["model"].get("output_activation", "identity")
 
 import numpy as np
 import torch
@@ -1988,33 +1955,27 @@ Consequently, the Riemannian metric on parameter space $\Theta$ should **depend 
         {
             "type": "code",
             "source": r"""
-# =============================================================================
-# USER CONFIGURATION
-# =============================================================================
-# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
-#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
-DATASET_NAME = "moons"
-N_CLASSES = 2                  # Number of classes (defaults to 2)
-DATASET_PARAMS = {
-    "n_train": 220,
-    "n_test": 120,
-    "noise": 0.10,
-    "seed": 42,
-}
-
-# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
-LAYER_DIMS = [2, 5, 10, 15, 10, 2]
-
-# 3. Activation Functions for Hidden Layers and Output Layer
-HIDDEN_ACTIVATION = "tanh"
-OUTPUT_ACTIVATION = "identity"
-# =============================================================================
-
 import sys
 from pathlib import Path
-for p in [Path.cwd(), Path.cwd().parent]:
-    if (p / "src" / "geometry.py").exists() and str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+import yaml
+
+PROJECT_ROOT = Path.cwd()
+for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
+    if (p / "src" / "geometry.py").exists():
+        PROJECT_ROOT = p
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+        break
+
+with open(PROJECT_ROOT / "config.yaml", "r") as f:
+    CFG = yaml.safe_load(f)
+
+DATASET_NAME = CFG["dataset"]["name"]
+N_CLASSES = CFG["dataset"].get("n_classes", 2)
+DATASET_PARAMS = dict(CFG["dataset"].get("params", {}))
+LAYER_DIMS = list(CFG["model"]["layer_dims"])
+HIDDEN_ACTIVATION = CFG["model"].get("hidden_activation", "tanh")
+OUTPUT_ACTIVATION = CFG["model"].get("output_activation", "identity")
 
 import copy
 import time
@@ -2675,33 +2636,27 @@ In this notebook, we implement and benchmark **four principled approaches** that
         {
             "type": "code",
             "source": r"""
-# =============================================================================
-# USER CONFIGURATION
-# =============================================================================
-# 1. Toy Dataset Configuration (from sklearn.datasets synthetic generators)
-#    Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
-DATASET_NAME = "moons"
-N_CLASSES = 2                  # Number of classes (defaults to 2)
-DATASET_PARAMS = {
-    "n_train": 220,
-    "n_test": 120,
-    "noise": 0.10,
-    "seed": 42,
-}
-
-# 2. Neural Network Layer Architecture: [input_dim, *hidden_dims, output_dim]
-LAYER_DIMS = [2, 5, 10, 15, 10, 2]
-
-# 3. Activation Functions for Hidden Layers and Output Layer
-HIDDEN_ACTIVATION = "tanh"
-OUTPUT_ACTIVATION = "identity"
-# =============================================================================
-
 import sys
 from pathlib import Path
-for p in [Path.cwd(), Path.cwd().parent]:
-    if (p / "src" / "geometry.py").exists() and str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+import yaml
+
+PROJECT_ROOT = Path.cwd()
+for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
+    if (p / "src" / "geometry.py").exists():
+        PROJECT_ROOT = p
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+        break
+
+with open(PROJECT_ROOT / "config.yaml", "r") as f:
+    CFG = yaml.safe_load(f)
+
+DATASET_NAME = CFG["dataset"]["name"]
+N_CLASSES = CFG["dataset"].get("n_classes", 2)
+DATASET_PARAMS = dict(CFG["dataset"].get("params", {}))
+LAYER_DIMS = list(CFG["model"]["layer_dims"])
+HIDDEN_ACTIVATION = CFG["model"].get("hidden_activation", "tanh")
+OUTPUT_ACTIVATION = CFG["model"].get("output_activation", "identity")
 
 import time
 import numpy as np

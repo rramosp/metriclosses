@@ -507,3 +507,89 @@ OUTPUT_ACTIVATION = "identity"
 - **Dynamic Layer Depth & Widths (`LAYER_DIMS`)**: Replaced hardcoded layer counts (`5`), parameter counts (`422`), and subplot grids across all 7 notebooks with dynamic queries (`model.num_layers`, `P_total`, and `CE_LAYER_DIMS = [*LAYER_DIMS[:-1], max(LAYER_DIMS[-1], N_CLASSES)]` for Cross-Entropy baselines when `N_CLASSES > LAYER_DIMS[-1]`).
 - **Separate Hidden & Output Activations (`HIDDEN_ACTIVATION`, `OUTPUT_ACTIVATION`)**: Extended `MoonsMLP` and `_make_single_point_layer_fn` with `output_activation` (`"identity"`, `"tanh"`, `"gelu"`, `"silu"`, `"softplus"`, `"elu"`, `"sigmoid"`, `"sin"`, `"softmax"`, `"log_softmax"`, `"relu"`), ensuring exact consistency between `model.forward` and `torch.func` pullback metric/curvature operators.
 - **Multi-Class Generalization**: Generalized `compute_parameter_fim`, `compute_data_information_matrix`, `curvature_margin_loss`, `volume_contrastive_loss`, `anisotropy_margin_loss`, `scalar_geometric_predict`, `compute_coupled_geometric_metric`, and `woodbury_coupled_ngd_direction` to arbitrary `N_CLASSES >= 2` while preserving exact numerical equivalence for default `N_CLASSES = 2`.
+
+
+---
+
+## Turn 13
+
+### User
+explain how the losses are constructed in the case of multiclass classification and the different geometric losses, and include the explanation into README.md
+
+### Assistant
+#### 1. Coordinate Cross-Entropy vs. Multiclass Scalar Geometric Band Partitioning
+- **Cross-Entropy Baseline (`CE`)**: Uses $C$ coordinate channels ($z(x) \in \mathbb{R}^{\max(d_L, C)}$, promoted automatically via `CE_LAYER_DIMS` when `N_CLASSES > LAYER_DIMS[-1]`) and classifies via $\hat{y}(x) = \arg\max_c z_c(x)$.
+- **Purely Differential-Geometric Losses**: Never inspect output coordinates $z_a(x)$ and do **not** require $C$ output neurons (even a 2D output map $\Phi^{(L)}_\theta: \mathbb{R}^2 \to \mathbb{R}^2$ works for any $C \ge 2$). Instead, each loss computes a **single geometric scalar invariant** $\psi(x; \theta) \in \mathbb{R}$ from the pullback metric $g^{(L)}(x; \theta)$ and partitions $\mathbb{R}$ into **$C$ ordered, margin-separated geometric bands** (`_scalar_geometric_margin_loss_and_weights` and `scalar_geometric_predict` in [src/geometry.py](src/geometry.py)).
+
+With margin $\tau > 0$ (`margin`), sharpness $\beta > 0$ (`beta_hinge = 4.0`), and smooth hinge $\sigma_\beta(u) = \frac{1}{\beta}\log(1 + e^{\beta u})$:
+- **Binary ($C = 2$)**: Enforces opposite half-lines $\psi \le -\tau$ ($y = 0$) and $\psi \ge +\tau$ ($y = 1$) via $\ell_y(\psi) = \sigma_\beta(\tau - (2y - 1)\psi)$, predicting $\hat{y}(x) = \mathbb{I}[\psi(x) > 0]$.
+- **Multiclass ($C \ge 3$)**: Assigns symmetric target centers $t_c$ spaced by $2\tau$ and midpoint decision thresholds $b_c$:
+  $$t_c = 2\tau \left(c - \frac{C - 1}{2}\right), \qquad b_c = \frac{t_c + t_{c+1}}{2} = 2\tau \left(c + \frac{1}{2} - \frac{C - 1}{2}\right)$$
+  Outer classes ($y = 0$ and $y = C - 1$) use one-sided rays so stronger separation on the outer ends is free, whereas interior classes ($0 < y < C - 1$) use two-sided deadzone tubes $[t_y - \frac{\tau}{2}, t_y + \frac{\tau}{2}]$ so they cannot encroach on adjacent classes:
+  $$\ell_y(\psi) = \begin{cases}
+  \sigma_\beta\!\left(\psi - \left(t_0 + \tfrac{\tau}{2}\right)\right), & y = 0 \\[4pt]
+  \sigma_\beta\!\left(\left(t_y - \tfrac{\tau}{2}\right) - \psi\right) + \sigma_\beta\!\left(\psi - \left(t_y + \tfrac{\tau}{2}\right)\right), & 0 < y < C - 1 \\[4pt]
+  \sigma_\beta\!\left(\left(t_{C-1} - \tfrac{\tau}{2}\right) - \psi\right), & y = C - 1
+  \end{cases}$$
+  Consecutive acceptance bands are separated by a gap of width $\tau$ centered on $b_c$, and test prediction buckets $\psi(x)$ via $\hat{y}(x) = \sum_{c=0}^{C-2} \mathbb{I}[\psi(x) > b_c]$. For $C = 3$, the three acceptance regimes are $(-\infty, -\frac{3}{2}\tau]$, $[-\frac{\tau}{2}, +\frac{\tau}{2}]$, and $[+\frac{3}{2}\tau, +\infty)$ separated at $-\tau$ and $+\tau$.
+
+#### 2. Construction of the Three Geometric Losses
+Let $J(x; \theta) = \partial_x \Phi^{(L)}_\theta(x) \in \mathbb{R}^{d_L \times d_0}$ and $\mathcal{L}_{\mathrm{band}}(\psi, y) = \frac{1}{N}\sum_{n=1}^N \ell_{y_n}(\psi(x_n))$:
+1. **Gaussian Curvature Margin Loss (`curvature_margin_loss`, 3rd-order wrt $(\theta, x)$)**:
+   - Uses the **graph immersion metric** $\tilde{g} = I_2 + J^T J$ on $(x, \Phi^{(L)}_\theta(x)) \subset \mathbb{R}^{2 + d_L}$ (necessary when $d_L = 2$ because a direct map $\mathbb{R}^2 \to \mathbb{R}^2$ has zero intrinsic Euclidean curvature away from singularities) and saturates curvature via $\psi_{\mathrm{curv}}(x) = K_{\max}\tanh(K(x)/K_{\max})$ where $K = R_{1212}/\det\tilde{g}$.
+   - For $C = 3$, Class `0` maps to negatively curved saddles ($K \lesssim -\frac{3}{2}\tau$), Class `1` to a nearly flat parabolic sheet ($|K| \lesssim \frac{\tau}{2}$), and Class `2` to positively curved domes ($K \gtrsim +\frac{3}{2}\tau$).
+   - Objective: $\mathcal{L}_{\mathrm{curv}} = \mathcal{L}_{\mathrm{band}}(\psi_{\mathrm{curv}}, y) + \lambda_{\mathrm{vol}}\mathbb{E}[(\log\det\tilde{g})^2] + \lambda_{\mathrm{iso}}\mathbb{E}[\|\tilde{g} - I_2\|_F^2]$, preventing curvature blowup through trivial area collapse ($\det\tilde{g} \to 0$).
+2. **Riemannian Volume-Element Contrastive Loss (`volume_contrastive_loss`, 2nd-order wrt $(\theta, x)$)**:
+   - Uses the **Euclidean pullback metric** $g = J^T J + \varepsilon I_2$ and log area element $\psi_{\mathrm{vol}}(x) = \log\sqrt{\det g(x)} = \frac{1}{2}\log\det g(x)$.
+   - For $C = 3$, separates classes into locally contractive ($\det g < 1$), locally equiareal/volume-preserving ($\det g \approx 1$), and locally expansive ($\det g > 1$) regimes.
+   - Objective: $\mathcal{L}_{\mathrm{vol}} = \mathcal{L}_{\mathrm{band}}(\psi_{\mathrm{vol}}, y) + \lambda_{\mathrm{iso}}\mathbb{E}[\psi_{\mathrm{vol}}^2]$, keeping outer rays bounded away from $0$ and $\infty$.
+3. **Directional Metric Anisotropy Loss (`anisotropy_margin_loss`, 2nd-order wrt $(\theta, x)$)**:
+   - Uses the directional stretching ratio $\psi_{\mathrm{aniso}}(x) = \log(g_{11}(x)/g_{22}(x))$ under the pullback metric $g$.
+   - For $C = 3$, separates classes into vertical-dominant stretching ($g_{11} \ll g_{22}$), locally conformal/isotropic representations ($g_{11} \approx g_{22}$), and horizontal-dominant stretching ($g_{11} \gg g_{22}$).
+   - Objective: $\mathcal{L}_{\mathrm{aniso}} = \mathcal{L}_{\mathrm{band}}(\psi_{\mathrm{aniso}}, y) + \lambda_{\mathrm{vol}}\mathbb{E}[(\log\det g)^2]$, anchoring $\det g \approx 1$ so polarization arises from area-preserving shear rather than uniform scaling.
+4. **Coupled Parameter Metric (`compute_coupled_geometric_metric`)**: Weights $\nabla_\theta \psi(x)$ by the square root of the local second derivative of $\ell_y(\psi)$ across both lower and upper band walls ($t_y \pm \frac{\tau}{2}$) alongside the DeWitt metric on $\mathrm{Sym}^+_2$.
+
+*(Also added this explanation as a dedicated section in [README.md](README.md).)*
+
+
+---
+
+## Turn 14
+
+### User
+ok, take the user configuration out of the beginning of the notebooks into a file named config.yaml, so that each notebook reads it at the beginning.
+
+also, update the sys.path updating in all notebooks in the same way as it is in notebook 01:
+`for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:`
+
+### Assistant
+1. **Extracted Shared Configuration into [config.yaml](config.yaml)**:
+   - `dataset`: `name` (`"moons"`, `"circles"`, `"blobs"`, `"classification"`, `"gaussian_quantiles"`), `n_classes: 2`, and `params` (`n_train`, `n_test`, `noise`, `seed`, plus optional generator-specific parameters).
+   - `model`: `layer_dims` (`[2, 5, 10, 15, 10, 2]`), `hidden_activation` (`"tanh"`), and `output_activation` (`"identity"`).
+
+2. **Unified `sys.path` Resolution & `config.yaml` Loading Across All 7 Notebooks ([scripts/build_all_notebooks.py](scripts/build_all_notebooks.py))**:
+   Every notebook (`01` through `07`) now starts its first code cell with:
+   ```python
+   import sys
+   from pathlib import Path
+   import yaml
+
+   PROJECT_ROOT = Path.cwd()
+   for p in [Path.cwd(), Path.cwd().parent, Path.cwd() / Path("projects") / Path("diffgeom")]:
+       if (p / "src" / "geometry.py").exists():
+           PROJECT_ROOT = p
+           if str(p) not in sys.path:
+               sys.path.insert(0, str(p))
+           break
+
+   with open(PROJECT_ROOT / "config.yaml", "r") as f:
+       CFG = yaml.safe_load(f)
+
+   DATASET_NAME = CFG["dataset"]["name"]
+   N_CLASSES = CFG["dataset"].get("n_classes", 2)
+   DATASET_PARAMS = dict(CFG["dataset"].get("params", {}))
+   LAYER_DIMS = list(CFG["model"]["layer_dims"])
+   HIDDEN_ACTIVATION = CFG["model"].get("hidden_activation", "tanh")
+   OUTPUT_ACTIVATION = CFG["model"].get("output_activation", "identity")
+   ```
+   All seven notebooks were rebuilt and executed end-to-end, and [README.md](README.md) was updated to document [config.yaml](config.yaml).

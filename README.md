@@ -21,6 +21,45 @@ This project investigates the differential geometric interplay between two funda
 
 ---
 
+## Mathematical Construction of the Geometric & Multiclass Losses
+
+### 1. Coordinate Cross-Entropy vs. Scalar Geometric Band Partitioning
+Standard **Cross-Entropy (`CE`)** classification maps $x \in \mathbb{R}^{d_0} \mapsto z(x) \in \mathbb{R}^{d_L}$ with $d_L \ge C$ coordinate channels (in the notebooks, `CE_LAYER_DIMS` automatically promotes the output width to $\max(d_L, C)$ when `N_CLASSES > LAYER_DIMS[-1]`):
+$$\mathcal{L}_{\mathrm{CE}}(\theta) = -\frac{1}{N} \sum_{n=1}^N \log \frac{\exp(z_{y_n}(x_n))}{\sum_{c=0}^{C-1} \exp(z_c(x_n))}, \qquad \hat{y}(x) = \arg\max_{c \in \{0,\dots,C-1\}} z_c(x)$$
+
+By contrast, **purely differential-geometric losses** never inspect individual output coordinates $z_a(x)$ and do **not** require $C$ output neurons (a 2D output surface $\Phi^{(L)}_\theta : \mathbb{R}^2 \to \mathbb{R}^2$ suffices for any $C \ge 2$). Instead, each loss extracts a **single geometric scalar field** $\psi(x; \theta) \in \mathbb{R}$ from the final-layer pullback metric $g^{(L)}(x; \theta)$ and partitions the 1D geometric spectrum $\mathbb{R}$ into **$C$ ordered, margin-separated geometric regimes** (`_scalar_geometric_margin_loss_and_weights` and `scalar_geometric_predict` in `src/geometry.py`).
+
+Let $\tau > 0$ be the margin (`margin`), $\beta > 0$ the softplus sharpness (`beta_hinge = 4.0`), and $\sigma_\beta(u) = \frac{1}{\beta}\log(1 + e^{\beta u})$:
+
+- **Binary Case ($C = 2$)**: Classes `0` and `1` are driven into opposite half-lines $\psi \le -\tau$ and $\psi \ge +\tau$ separated by the zero level set $\psi(x) = 0$:
+  $$\ell_y(\psi) = \sigma_\beta\!\big(\tau - (2y - 1)\,\psi\big), \qquad \hat{y}(x) = \mathbb{I}[\psi(x) > 0]$$
+- **Multiclass Case ($C \ge 3$)**: Each class $c \in \{0, \dots, C - 1\}$ is assigned a symmetric target center $t_c$ spaced by $2\tau$, with half-band width $\tau / 2$:
+  $$t_c = 2\tau \left(c - \frac{C - 1}{2}\right), \qquad b_c = \frac{t_c + t_{c+1}}{2} = 2\tau \left(c + \frac{1}{2} - \frac{C - 1}{2}\right)$$
+  Outer classes ($c = 0$ and $c = C - 1$) occupy open rays so extreme geometric separation is unpenalized, while interior classes ($0 < c < C - 1$) occupy bounded deadzone tubes $\left[t_c - \frac{\tau}{2},\; t_c + \frac{\tau}{2}\right]$ so they do not spill into adjacent classes:
+  $$\ell_y(\psi) = \begin{cases}
+  \sigma_\beta\!\left(\psi - \left(t_0 + \tfrac{\tau}{2}\right)\right), & y = 0 \quad \big(\text{target: } \psi \le t_0 + \tfrac{\tau}{2}\big) \\[4pt]
+  \sigma_\beta\!\left(\left(t_y - \tfrac{\tau}{2}\right) - \psi\right) + \sigma_\beta\!\left(\psi - \left(t_y + \tfrac{\tau}{2}\right)\right), & 0 < y < C - 1 \quad \big(\text{target: } |\psi - t_y| \le \tfrac{\tau}{2}\big) \\[4pt]
+  \sigma_\beta\!\left(\left(t_{C-1} - \tfrac{\tau}{2}\right) - \psi\right), & y = C - 1 \quad \big(\text{target: } \psi \ge t_{C-1} - \tfrac{\tau}{2}\big)
+  \end{cases}$$
+  Every adjacent pair of target bands is separated by an explicit gap of width $\tau$ centered on the midpoint threshold $b_c$, and test-time prediction buckets $\psi(x)$ directly against $\{b_0, \dots, b_{C-2}\}$:
+  $$\hat{y}(x) = \sum_{c=0}^{C-2} \mathbb{I}\big[\psi(x) > b_c\big]$$
+  *(For example, when $C = 3$, the target regimes are $(-\infty, -\tfrac{3}{2}\tau]$, $[-\tfrac{\tau}{2}, +\tfrac{\tau}{2}]$, and $[+\tfrac{3}{2}\tau, +\infty)$ with decision boundaries at $-\tau$ and $+\tau$.)*
+
+---
+
+### 2. Definitions of the Three Purely Geometric Losses
+Let $J(x; \theta) = \partial_x \Phi^{(L)}_\theta(x) \in \mathbb{R}^{d_L \times d_0}$ denote the spatial Jacobian of the output map, and let $\mathcal{L}_{\mathrm{band}}(\psi, y) = \frac{1}{N}\sum_{n=1}^N \ell_{y_n}(\psi(x_n))$. Each geometric loss combines a specific pullback metric, scalar invariant $\psi(x; \theta)$, and coordinate-free metric regularizer:
+
+| Geometric Loss | Pullback Metric $g(x; \theta)$ | Target Invariant $\psi(x; \theta)$ | Geometric Interpretation ($C = 2$ vs. $C = 3$ Example) | Metric Regularizers & Total Objective |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. Gaussian Curvature** (`curvature_margin_loss`) | Graph metric $\tilde{g} = I_2 + J^T J$ on $(x, \Phi^{(L)}_\theta(x)) \subset \mathbb{R}^{2+d_L}$ | $\psi_{\mathrm{curv}} = K_{\max}\tanh\!\left(\frac{K(x)}{K_{\max}}\right)$, $K = \frac{R_{1212}}{\det \tilde{g}}$ | **$C=2$**: hyperbolic saddle ($K<0$) vs. elliptic dome ($K>0$).<br>**$C=3$**: saddle ($K \lesssim -\tfrac{3}{2}\tau$), flat parabolic band ($K \approx 0$), dome ($K \gtrsim +\tfrac{3}{2}\tau$). | $\mathcal{L}_{\mathrm{band}}(\psi_{\mathrm{curv}}, y) + \lambda_{\mathrm{vol}}\mathbb{E}[(\log\det\tilde{g})^2] + \lambda_{\mathrm{iso}}\mathbb{E}[\|\tilde{g} - I_2\|_F^2]$ *(prevents $K \propto 1/\det\tilde{g}$ area-collapse blowup)*. |
+| **2. Volume-Element** (`volume_contrastive_loss`) | Euclidean pullback $g = J^T J + \varepsilon I_2$ ($\varepsilon = 10^{-6}$) | $\psi_{\mathrm{vol}} = \log\sqrt{\det g(x)} = \tfrac{1}{2}\log\det g(x)$ | **$C=2$**: contractive ($\det g < 1$) vs. expansive ($\det g > 1$).<br>**$C=3$**: contractive, locally equiareal ($\det g \approx 1$), expansive. | $\mathcal{L}_{\mathrm{band}}(\psi_{\mathrm{vol}}, y) + \lambda_{\mathrm{iso}}\mathbb{E}[\psi_{\mathrm{vol}}^2]$ *(prevents unbounded dilation $\det g \to \infty$ or rank collapse $\det g \to 0$ on outer rays)*. |
+| **3. Metric Anisotropy** (`anisotropy_margin_loss`) | Graph or Euclidean pullback $g(x; \theta)$ | $\psi_{\mathrm{aniso}} = \log\frac{g_{11}(x)}{g_{22}(x)}$ | **$C=2$**: vertical stretch ($g_{11} < g_{22}$) vs. horizontal stretch ($g_{11} > g_{22}$).<br>**$C=3$**: vertical stretch, conformal/isotropic ($g_{11} \approx g_{22}$), horizontal stretch. | $\mathcal{L}_{\mathrm{band}}(\psi_{\mathrm{aniso}}, y) + \lambda_{\mathrm{vol}}\mathbb{E}[(\log\det g)^2]$ *(anchors area $\det g \approx 1$ to enforce pure area-preserving shear)*. |
+
+> **Coupled Natural Gradient Adaptation (`compute_coupled_geometric_metric`)**: In the coupled parameter-space metric $G^{\Theta,\mathrm{coupled}}(\theta)$, the Generalized Gauss-Newton weight $w_\psi(x)$ is computed directly from the local curvature of $\ell_y(\psi)$ at the active band walls ($t_y \pm \frac{\tau}{2}$ for $C \ge 3$, or $\pm \tau$ for $C = 2$), concentrating parameter-space metric stiffness on points near geometric regime transitions while quotienting out $E(d_L)$ output symmetries via the affine-invariant DeWitt metric on $\mathrm{Sym}^+_2$.
+
+---
+
 ## Main Results & Charts
 
 ### 1. Classification with Purely Differential-Geometric Losses
@@ -64,6 +103,7 @@ First-order metric invariants (**Volume-Element** $\sqrt{\det g}$ and **Metric A
 ```text
 diffgeom/
 ├── README.md                                                 # Project summary, key results charts, and layout
+├── config.yaml                                               # Shared dataset, architecture & activation config read by all notebooks
 ├── spec.md                                                   # Mathematical formulation, literature review & experiment plan
 ├── src/
 │   ├── __init__.py                                           # Package exports
@@ -89,10 +129,10 @@ diffgeom/
 
 ## Notebook Configuration & Reproducibility
 
-At the top of the first code cell in every notebook (`01` through `07`), a `# USER CONFIGURATION` block lets you customize:
-1. **Toy Synthetic Dataset (`DATASET_NAME`, `N_CLASSES = 2`, `DATASET_PARAMS`)**: Choose among `"moons"`, `"circles"`, `"blobs"`, `"classification"`, and `"gaussian_quantiles"` from `scikit-learn` along with `noise`, `n_train`, `n_test`, `seed`, `N_CLASSES` (default `2`), and generator-specific options (`factor`, `cluster_std`, `class_sep`, `cov`).
-2. **Layer Architecture (`LAYER_DIMS`)**: Any integer sequence `[input_dim, *hidden_dims, output_dim]` (default `[2, 5, 10, 15, 10, 2]`).
-3. **Hidden & Output Activations (`HIDDEN_ACTIVATION`, `OUTPUT_ACTIVATION`)**: Independently configurable hidden and output nonlinearities (`"tanh"`, `"gelu"`, `"silu"`, `"softplus"`, `"elu"`, `"sigmoid"`, `"sin"`, `"relu"`, `"identity"`, `"softmax"`, `"log_softmax"`).
+All seven notebooks (`01` through `07`) read their experiment settings at startup from `config.yaml` at the project root:
+1. **Toy Synthetic Dataset (`dataset.name`, `dataset.n_classes: 2`, `dataset.params`)**: Choose among `"moons"`, `"circles"`, `"blobs"`, `"classification"`, and `"gaussian_quantiles"` from `scikit-learn` along with `noise`, `n_train`, `n_test`, `seed`, `n_classes` (default `2`), and generator-specific options (`factor`, `cluster_std`, `class_sep`, `cov`).
+2. **Layer Architecture (`model.layer_dims`)**: Any integer sequence `[input_dim, *hidden_dims, output_dim]` (default `[2, 5, 10, 15, 10, 2]`).
+3. **Hidden & Output Activations (`model.hidden_activation`, `model.output_activation`)**: Independently configurable hidden and output nonlinearities (`"tanh"`, `"gelu"`, `"silu"`, `"softplus"`, `"elu"`, `"sigmoid"`, `"sin"`, `"relu"`, `"identity"`, `"softmax"`, `"log_softmax"`).
 
 All notebooks are pre-executed with embedded outputs. To regenerate and execute all seven notebooks from scratch:
 
