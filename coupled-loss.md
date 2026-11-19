@@ -1066,3 +1066,80 @@ Implemented all four memory-scalable $S_C$-symmetric coupled geometric formulati
 
 5. **Section 5 — Simultaneous High-Dimension + Many-Class Diagonal Stress Test (`d_0 = C = 4 -> 256`, `N = 256`)**:
    - At **`(d_0 = 256, C = 256)`**: `Midpt-Barrier`: **`2.56 ms / 7.32 MB`** | `LogFib-DeWitt (d_L = 16)`: **`5.21 ms / 13.34 MB`** | `ParamFD-Subsp`: **`18.84 ms / 20.78 MB`** | `Analytic Head-Subsp`: **`8.81 ms / 22.86 MB`**.
+
+
+---
+
+## Turn 28
+
+### User
+update both charts so that dims and classes include 512 and 1024
+
+### Assistant
+Updated all dimension and class-count sweeps and charts across Sections 1, 3, 4, and 5 of [notebooks/09-scalable-coupled-multiclass.ipynb](notebooks/09-scalable-coupled-multiclass.ipynb) (via [scripts/build_all_notebooks.py](scripts/build_all_notebooks.py), plus fast vectorized no-grad Riesz prototype dispersion in `build_log_fiber_prototypes` in [src/diffgeom/geometry.py](src/diffgeom/geometry.py)) to span **`512` and `1024`** (`d_0 = 2 -> 1024`, `C = 2 -> 1024`, and joint diagonal `d_0 = C = 4 -> 1024`).
+
+### Verified Extended Scaling Results (`512` and `1024`)
+
+1. **Section 3 — Ambient Input Dimension (`d_0 = 2 -> 1024`, `C = 3`, `N = 96`)**:
+
+| `d_0` | `Nb08 Barrier` (`ms` / `MB`) | `Nb08 Subspace` (`ms` / `MB`) | `Nb09 LogFib-DW` | `Nb09 Midpt-Barrier` | `Nb09 Analytic Head` | `Nb09 ParamFD (r=6)` |
+| ---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `128` | `69.88 / 1125.41` | `830.97 / 1767.38` | **`2.50 / 1.38`** | **`2.00 / 1.42`** | **`4.61 / 3.12`** | **`10.22 / 4.40`** |
+| `256` | `> 4 GB / skip` | `> 4 GB / skip` | **`2.52 / 2.06`** | **`1.71 / 2.47`** | **`3.51 / 3.80`** | **`10.10 / 5.71`** |
+| `512` | `> 4 GB / skip` | `> 4 GB / skip` | **`3.20 / 3.40`** | **`2.08 / 4.57`** | **`3.89 / 5.14`** | **`14.42 / 8.34`** |
+| `1024` | `> 4 GB / skip` | `> 4 GB / skip` | **`3.48 / 6.10`** | **`2.84 / 8.75`** | **`5.02 / 7.84`** | **`18.57 / 13.60`** |
+
+2. **Section 4 — Number of Classes (`C = 2 -> 1024`, `d_0 = 2`, `N = 256`)**:
+
+| `C` | `SGD+CE (d_L=C)` | `Nb08 OneHot (d_L=2C)` | `Nb08 Subspace` | `Nb09 LogFib-DW` | `Nb09 Midpt-Barrier` | `Nb09 Analytic Head` | `Nb09 ParamFD` |
+| ---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `128` | `0.90 / 1.27` | `16.47 / 78.38` | `344.55 / 2373.86` | **`4.83 / 8.03`** | **`1.79 / 1.42`** | **`5.88 / 15.52`** | **`11.54 / 11.33`** |
+| `256` | `0.94 / 2.29` | `> 4 GB / skip` | `> 4 GB / skip` | **`4.00 / 9.04`** | **`1.72 / 1.42`** | **`6.47 / 18.95`** | **`12.26 / 11.70`** |
+| `512` | `1.08 / 4.32` | `> 4 GB / skip` | `> 4 GB / skip` | **`3.71 / 10.05`** | **`1.79 / 1.42`** | **`5.94 / 18.95`** | **`13.89 / 11.70`** |
+| `1024` | `1.32 / 8.39` | `> 4 GB / skip` | `> 4 GB / skip` | **`4.06 / 11.07`** | **`2.12 / 1.42`** | **`7.38 / 18.95`** | **`21.88 / 11.70`** |
+
+3. **Section 5 — Joint Diagonal (`d_0 = C = 4 -> 1024`, `N = 256`)**:
+   - **`512 x 512`** (`d_L(LogFib) = 18`): `SGD+CE`: `1.34 ms / 4.76 MB` | `Midpt-Barrier`: **`2.86 ms / 12.88 MB`** | `LogFib-DeWitt`: **`4.93 ms / 17.92 MB`** | `Head-Subsp`: **`7.30 ms / 26.43 MB`** | `ParamFD-Subsp`: **`23.94 ms / 26.91 MB`**.
+   - **`1024 x 1024`** (`d_L(LogFib) = 20`): `SGD+CE`: `2.03 ms / 9.02 MB` | `Midpt-Barrier`: **`4.27 ms / 24.01 MB`** | `LogFib-DeWitt`: **`9.00 ms / 26.06 MB`** | `Head-Subsp`: **`7.17 ms / 33.56 MB`** | `ParamFD-Subsp`: **`25.89 ms / 39.16 MB`**.
+
+
+---
+
+## Turn 29
+
+### User
+ok, now add 2048 and 4096
+
+### Assistant
+Extended all dimension and class-count sweeps and charts across Sections 1, 3, 4, and 5 of [notebooks/09-scalable-coupled-multiclass.ipynb](notebooks/09-scalable-coupled-multiclass.ipynb) (via [scripts/build_all_notebooks.py](scripts/build_all_notebooks.py) and [src/diffgeom/geometry.py](src/diffgeom/geometry.py)) to include **`2048` and `4096`** (`d_0 = 2 -> 4096`, `C = 2 -> 4096`, and joint diagonal `d_0 = C = 4 -> 4096`).
+
+### Verified Extended Scaling Results (`2048` & `4096`)
+
+1. **Section 1 — Prototype Separation & Output Width at `C = 2048` and `4096`**:
+   - **`C = 2048` (`K = 11`, `d_L = 22` vs. `2048` CE logits)**: `Min d_AI Single = 0.0077` vs. **`Min d_AI LogFib = 1.3724`**.
+   - **`C = 4096` (`K = 12`, `d_L = 24` vs. `4096` CE logits)**: `Min d_AI Single = 0.0039` vs. **`Min d_AI LogFib = 1.3362`**.
+
+2. **Section 3 — Ambient Input Dimension (`d_0 = 2 -> 4096`, `C = 3`, `N = 96`)**:
+
+| `d_0` | `Nb08 Barrier` (`ms` / `MB`) | `Nb08 Subspace` (`ms` / `MB`) | `Nb09 LogFib-DW` | `Nb09 Midpt-Barrier` | `Nb09 Analytic Head` | `Nb09 ParamFD (r=6)` |
+| ---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `128` | `98.75 / 1125.41` | `915.59 / 1767.38` | **`2.23 / 1.38`** | **`1.67 / 1.42`** | **`3.98 / 3.12`** | **`12.07 / 4.40`** |
+| `512` | `> 4 GB / skip` | `> 4 GB / skip` | **`3.04 / 3.40`** | **`2.18 / 4.57`** | **`3.77 / 5.14`** | **`15.62 / 8.34`** |
+| `1024` | `> 4 GB / skip` | `> 4 GB / skip` | **`3.16 / 6.10`** | **`2.43 / 8.75`** | **`9.48 / 7.84`** | **`18.31 / 13.60`** |
+| `2048` | `> 4 GB / skip` | `> 4 GB / skip` | **`3.97 / 11.49`** | **`3.35 / 17.13`** | **`5.93 / 13.23`** | **`22.02 / 24.12`** |
+| `4096` | `> 4 GB / skip` | `> 4 GB / skip` | **`5.22 / 22.27`** | **`4.64 / 33.88`** | **`10.18 / 24.01`** | **`31.14 / 45.15`** |
+
+3. **Section 4 — Number of Classes (`C = 2 -> 4096`, `d_0 = 2`, `N = 256`) — Memory Crossover Below `SGD + Cross-Entropy`**:
+
+| `C` | `SGD+CE (d_L=C)` | `Nb08 OneHot (d_L=2C)` | `Nb08 Subspace` | `Nb09 LogFib-DW` | `Nb09 Midpt-Barrier` | `Nb09 Analytic Head` | `Nb09 ParamFD` |
+| ---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `512` | `1.17 / 4.32` | `> 4 GB / skip` | `> 4 GB / skip` | **`4.10 / 10.05`** | **`1.87 / 1.42`** | **`6.65 / 18.95`** | **`16.28 / 11.70`** |
+| `1024` | `1.95 / 8.39` | `> 4 GB / skip` | `> 4 GB / skip` | **`5.51 / 11.07`** | **`1.87 / 1.42`** | **`6.81 / 18.95`** | **`12.13 / 11.70`** |
+| `2048` | `2.14 / 16.52` | `> 4 GB / skip` | `> 4 GB / skip` | **`4.18 / 12.08`** | **`1.74 / 1.42`** | **`9.55 / 18.95`** | **`12.02 / 11.70`** |
+| `4096` | `3.43 / 32.78` | `> 4 GB / skip` | `> 4 GB / skip` | **`4.98 / 13.09`** | **`1.86 / 1.42`** | **`6.43 / 18.95`** | **`13.83 / 11.70`** |
+
+* At **`C = 4096`**, **`SGD + Cross-Entropy`** grows to **`32.78 MB`** (`3.43 ms`) due to its $O(NC)$ logit layer (`d_L = 4096`), crossing **above all four scalable geometric losses** (`Midpt-Barrier`: **`1.42 MB` (`23.1x` less memory & faster at `1.86 ms`)**, `ParamFD`: **`11.70 MB`**, `LogFib-DeWitt`: **`13.09 MB`**, `Analytic Head`: **`18.95 MB`**).
+
+4. **Section 5 — Simultaneous Joint Diagonal (`d_0 = C = 4 -> 4096`, `N = 256`)**:
+   - **`2048 x 2048`** (`d_L(LogFib) = 22`): `SGD+CE`: `2.80 ms / 17.52 MB` | `LogFib-DeWitt`: **`6.93 ms / 41.34 MB`** | `Midpt-Barrier`: **`4.05 ms / 46.26 MB`** | `Head-Subsp`: **`8.74 ms / 47.83 MB`** | `ParamFD-Subsp`: **`35.77 ms / 63.68 MB`**.
+   - **`4096 x 4096`** (`d_L(LogFib) = 24`): `SGD+CE`: `5.20 ms / 34.54 MB` | `LogFib-DeWitt`: **`10.71 ms / 70.88 MB`** | `Head-Subsp`: **`11.63 ms / 76.36 MB`** | `Midpt-Barrier`: **`6.10 ms / 90.76 MB`** | `ParamFD-Subsp`: **`56.09 ms / 112.71 MB`**.

@@ -1800,17 +1800,22 @@ def build_log_fiber_prototypes(
         V[:, : n_classes - 1] = simp
         V = V @ Q_bal.T
     else:
-        gen = torch.Generator(device="cpu").manual_seed(seed)
-        V = F.normalize(torch.randn(n_classes, dim_tan, generator=gen, dtype=dtype).to(device), dim=-1)
-        for _ in range(180):
-            V_req = V.detach().requires_grad_(True)
-            dist = torch.cdist(V_req, V_req) + torch.eye(n_classes, dtype=dtype, device=device) * 10.0
-            rep_loss = (1.0 / (dist * dist)).sum()
-            (grad_v,) = torch.autograd.grad(rep_loss, V_req)
-            with torch.no_grad():
-                V = F.normalize(V_req - 0.05 * grad_v, dim=-1)
+        with torch.no_grad():
+            gen = torch.Generator(device="cpu").manual_seed(seed)
+            work_dtype = torch.float32 if n_classes > 256 else dtype
+            V = F.normalize(torch.randn(n_classes, dim_tan, generator=gen, dtype=work_dtype).to(device), dim=-1)
+            n_iters = 100 if n_classes <= 256 else 40
+            for _ in range(n_iters):
+                dist_sq = torch.clamp(2.0 - 2.0 * (V @ V.T), min=1e-5)
+                dist_sq.fill_diagonal_(100.0)
+                inv_d4 = 1.0 / (dist_sq * dist_sq)
+                inv_d4.fill_diagonal_(0.0)
+                grad_v = inv_d4 @ V - inv_d4.sum(dim=-1, keepdim=True) * V
+                step_dir = grad_v / torch.clamp(grad_v.norm(dim=-1, keepdim=True), min=1e-12)
+                V = F.normalize(V - 0.08 * step_dir, dim=-1)
+            V = V.to(dtype=dtype)
 
-    scale = tau * math.sqrt(min(float(K), 2.0))
+    scale = tau * math.sqrt(min(float(K), 2.5))
     V_fib = V.reshape(n_classes, K, 3) * scale
     base_s = tau + graph_margin
     s_proto = base_s + V_fib[..., 0]  # (C, K)

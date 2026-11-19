@@ -124,7 +124,7 @@ diffgeom/
 │   ├── 06-coupled-optimization.ipynb                         # Coupled parameter-data metric Natural GD vs. uncoupled baselines
 │   ├── 07-evaluating-efficient-training.ipynb                # 1st-order efficient geometric approximations vs. SGD Cross-Entropy baseline
 │   ├── 08-symmetric-coupled-multiclass.ipynb                 # S_C-symmetric coupled multiclass losses vs. 1D bands + compute/memory audit
-│   └── 09-scalable-coupled-multiclass.ipynb                  # O(1)/O(log C)-memory coupled geometric losses up to d_0 = 512 and C = 256
+│   └── 09-scalable-coupled-multiclass.ipynb                  # O(1)/O(log C)-memory coupled geometric losses up to d_0 = 4096 and C = 4096
 ├── scripts/
 │   ├── nb_executor.py                                        # Headless notebook builder & executor with inline PNG capture
 │   └── build_all_notebooks.py                                # Rebuilds and executes all 9 notebooks end-to-end

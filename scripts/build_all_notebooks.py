@@ -4961,14 +4961,14 @@ Before benchmarking runtime and memory, we verify the three mathematical foundat
    $$\sum_{a \neq b} \big\|\bar{W}_a \bar{W}_b^T\big\|_F^2 = \left\|\sum_{c=1}^{B_c} \bar{W}_c^T \bar{W}_c\right\|_F^2 - \sum_{c=1}^{B_c} \big\|\bar{W}_c \bar{W}_c^T\big\|_F^2$$
    forms only a tiny **$r \times r$ Gram matrix** (`6 x 6` or `32 x 32`) instead of an $O(N^2)$ sample-pair or $O(C^2)$ class-pair tensor.
 3. **Logarithmic Metric Codebook ($K = \lceil \log_2 C \rceil$ Fibers) & Canonical PCA 2-Frame ($Q_0 \in V_2(\mathbb{R}^{d_0})$)**:
-   - Dispersing $C$ prototypes in $(\mathrm{Sym}^+_2)^K$ with $K = \lceil \log_2 C \rceil$ prevents prototype crowding as $C \to 256$ while requiring only $d_L = 2\lceil \log_2 C \rceil$ output neurons (**narrower than Cross-Entropy's $C$ logits for all $C \ge 8$**).
+   - Dispersing $C$ prototypes in $(\mathrm{Sym}^+_2)^K$ with $K = \lceil \log_2 C \rceil$ prevents prototype crowding as $C \to 4096$ while requiring only $d_L = 2\lceil \log_2 C \rceil$ output neurons (**narrower than Cross-Entropy's $C$ logits for all $C \ge 8$**, e.g. `d_L = 24` vs. `4096` at $C = 4096$).
    - In high input dimension $d_0 \gg 2$, redrawing a *random* 2-plane $Q_t$ every step washes out anisotropic prototype orientations ($0^\circ, 60^\circ, 120^\circ$ rotate randomly with $Q_t$). Fixing $Q_0$ once at $t = 0$ as the **top-2 data PCA Stiefel 2-frame** preserves `3N` forward passes ($O(1)$ in $d_0$) and full $E(2)^K$ output invariance while giving a consistent tangent frame across training and inference.
 
 ### How to Interpret the Verification Output & 3-Panel Figure
 - **Stdout Precision Checks**: Both algebraic identities (`Hyperboloid DeWitt` vs. `2x2 Eigenvalues`, and `Gram Trace Identity` vs. `Explicit O(C^2) Sum`) should agree to `1e-10`–`1e-15`.
-- **Left Panel (`Min Pairwise Prototype Separation`)**: `Single Sym^+_2 (d_L = 2)` collapses toward zero as $1/C$ (`crowding`), whereas **`Log-Fibered (K = ceil(log2 C))`** keeps minimum pairwise DeWitt geodesic distance bounded above `1.5` all the way to $C = 256$.
-- **Middle Panel (`Required Output Width d_L`)**: `Log-Fibered DeWitt` grows logarithmically (`d_L = 16` at $C = 256$, vs. `256` for Cross-Entropy and `512` for One-Hot `(Sym^+_2)^C`).
-- **Right Panel (`Canonical PCA 2-Frame vs. Random Rotating 2-Plane`)**: On 8-class blobs in $\mathbb{R}^{16}$, fixing $Q_0$ reaches **`~99%`** test accuracy, whereas redrawing random 2-planes stalls near **`~65%`** due to orientation washout.
+- **Left Panel (`Min Pairwise Prototype Separation`)**: `Single Sym^+_2 (d_L = 2)` collapses toward zero as $1/C$ (`crowding`), whereas **`Log-Fibered (K = ceil(log2 C))`** keeps minimum pairwise DeWitt geodesic distance bounded around `1.4+` all the way to $C = 4096$.
+- **Middle Panel (`Required Output Width d_L`)**: `Log-Fibered DeWitt` grows logarithmically (`d_L = 24` at $C = 4096$, vs. `4096` for Cross-Entropy and `8192` for One-Hot `(Sym^+_2)^C`).
+- **Right Panel (`Canonical PCA 2-Frame vs. Random Rotating 2-Plane`)**: On 8-class blobs in $\mathbb{R}^{16}$, fixing $Q_0$ reaches **`~100%`** test accuracy, whereas redrawing random 2-planes stalls near **`~35%`** due to orientation washout.
 """,
         },
         {
@@ -5003,29 +5003,43 @@ err_gram = abs(gram_info["mean_cross_cls_sq"] - explicit_off)
 print(f"Max |Hyperboloid DeWitt - 2x2 Eigenvalue DeWitt| : {err_hyp:.3e}")
 print(f"Max |Gram Trace Identity - Explicit O(C^2) Sum|  : {err_gram:.3e}\n")
 
-c_grid = [3, 4, 8, 16, 32, 64, 128, 256]
+c_grid = [3, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
 min_d_single, min_d_logfib, min_d_onehot = [], [], []
 dl_ce, dl_logfib, dl_onehot, dl_const = [], [], [], []
+proto_cache_nb09 = {}
 
 print(f"{'C':>4} | {'K=ceil(log2 C)':>14} | {'d_L (LogFib / CE / OneHot)':>26} | {'Min d_AI Single':>15} | {'Min d_AI LogFib':>15} | {'Min d_AI OneHot':>15}")
 print("-" * 102)
 for c_val in c_grid:
-    # Single Sym^+_2
+    # Single Sym^+_2 (chunked min pairwise distance)
     pr_s, pisq_s = build_dewitt_simplex_prototypes(c_val, tau=0.80)
-    d2_s = compute_dewitt_dist_sq(pr_s, pisq_s) + torch.eye(c_val) * 1e6
-    md_s = math.sqrt(d2_s.min().item())
+    md_s_sq = float("inf")
+    for r0 in range(0, c_val, 64):
+        r1 = min(r0 + 64, c_val)
+        d2_blk = compute_dewitt_dist_sq(pr_s[r0:r1], pisq_s)
+        for loc_i in range(r1 - r0):
+            d2_blk[loc_i, r0 + loc_i] = 1e6
+        md_s_sq = min(md_s_sq, d2_blk.min().item())
+    md_s = math.sqrt(md_s_sq)
     min_d_single.append(md_s)
 
-    # Log-Fibered (Sym^+_2)^K
+    # Log-Fibered (Sym^+_2)^K (chunked min pairwise distance, cached for Sec 4 & 5)
     k_f, sp_f, up_f = build_log_fiber_prototypes(c_val, tau=0.80)
+    proto_cache_nb09[c_val] = (k_f, sp_f, up_f)
     up_f_pos = up_f * torch.tensor([1.0, -1.0, -1.0])
-    d2_f = hyperboloid_dewitt_dist_sq(
-        sp_f[:, None, :], up_f_pos[:, None, :, :], sp_f[None, :, :], up_f[None, :, :, :]
-    ) + torch.eye(c_val) * 1e6
-    md_f = math.sqrt(d2_f.min().item())
+    md_f_sq = float("inf")
+    for r0 in range(0, c_val, 64):
+        r1 = min(r0 + 64, c_val)
+        d2_blk = hyperboloid_dewitt_dist_sq(
+            sp_f[r0:r1, None, :], up_f_pos[r0:r1, None, :, :], sp_f[None, :, :], up_f[None, :, :, :]
+        )
+        for loc_i in range(r1 - r0):
+            d2_blk[loc_i, r0 + loc_i] = 1e6
+        md_f_sq = min(md_f_sq, d2_blk.min().item())
+    md_f = math.sqrt(md_f_sq)
     min_d_logfib.append(md_f)
 
-    # One-Hot (Sym^+_2)^C: active vs rest differs in 2 fibers by 2*(2*tau^2) = 4*tau^2 -> d = 2*tau
+    # One-Hot (Sym^+_2)^C: active vs rest differs in 2 fibers
     md_oh = 2.0 * math.sqrt(2.0) * 0.80
     min_d_onehot.append(md_oh)
 
@@ -5033,7 +5047,7 @@ for c_val in c_grid:
     dl_logfib.append(2 * k_f)
     dl_onehot.append(2 * c_val)
     dl_const.append(2)
-    print(f"{c_val:4d} | {k_f:14d} | {f'{2*k_f:3d} / {c_val:3d} / {2*c_val:3d}':>26} | {md_s:15.4f} | {md_f:15.4f} | {md_oh:15.4f}")
+    print(f"{c_val:4d} | {k_f:14d} | {f'{2*k_f:3d} / {c_val:4d} / {2*c_val:4d}':>26} | {md_s:15.4f} | {md_f:15.4f} | {md_oh:15.4f}")
 
 # Compare Canonical PCA 2-Frame Q_0 vs Random Rotating 2-Plane on 8-Class R^16
 X8_tr, y8_tr, X8_te, y8_te = get_synthetic_dataset("blobs", n_train=320, n_test=160, n_classes=8, input_dim=16, cluster_std=0.72, seed=11)
@@ -5073,12 +5087,12 @@ axes[0].plot(c_grid, min_d_logfib, "s-", color="#2ca02c", lw=2.3, label=r"Log-Fi
 axes[0].plot(c_grid, min_d_onehot, "^:", color="#1f77b4", lw=2.0, label=r"One-Hot $(\mathrm{Sym}^+_2)^C$ ($d_L = 2C$)")
 axes[0].set_xscale("log", base=2)
 axes[0].set_xticks(c_grid)
-axes[0].set_xticklabels([str(c) for c in c_grid])
+axes[0].set_xticklabels([str(c) for c in c_grid], fontsize=7.5, rotation=25)
 axes[0].set_xlabel("Number of Classes $C$")
 axes[0].set_ylabel(r"Min Pairwise Geodesic Dist $\min_{a \neq b} d_{\mathrm{AI}}$")
 axes[0].set_title("Prototype Separation vs. Class Count $C$")
 axes[0].grid(alpha=0.3)
-axes[0].legend(fontsize=8.2)
+axes[0].legend(fontsize=8.0)
 
 axes[1].plot(c_grid, dl_onehot, "^:", color="#1f77b4", lw=2.0, label=r"One-Hot Fibered ($d_L = 2C$)")
 axes[1].plot(c_grid, dl_ce, "*--", color="#111111", lw=2.0, label=r"Cross-Entropy Logits ($d_L = C$)")
@@ -5087,7 +5101,7 @@ axes[1].plot(c_grid, dl_const, "D-.", color="#ff7f0e", lw=2.0, label=r"Barrier &
 axes[1].set_xscale("log", base=2)
 axes[1].set_yscale("log", base=2)
 axes[1].set_xticks(c_grid)
-axes[1].set_xticklabels([str(c) for c in c_grid])
+axes[1].set_xticklabels([str(c) for c in c_grid], fontsize=7.5, rotation=25)
 axes[1].set_xlabel("Number of Classes $C$")
 axes[1].set_ylabel("Network Output Dimension $d_L$")
 axes[1].set_title("Required Output Width $d_L$ vs. $C$")
@@ -5272,15 +5286,15 @@ plt.show()
         },
         {
             "type": "markdown",
-            "source": r"""## 3. Scaling Experiment 1 — Latency & Memory vs. Input Dimension ($d_0 = 2 \to 512$)
+            "source": r"""## 3. Scaling Experiment 1 — Latency & Memory vs. Input Dimension ($d_0 = 2 \to 4096$)
 
 ### What This Experiment Does
-We benchmark step latency (`ms/step`) and CPU autograd memory allocation (`MB/step`) across ambient input dimensions **`d_0 = [2, 8, 32, 64, 128, 256, 512]`** (`C = 3`, `N = 96`, hidden layers `[16, 16]`—matching Section 5.1 of Notebook `08` and extending $4\times$ higher to `d_0 = 512`):
+We benchmark step latency (`ms/step`) and CPU autograd memory allocation (`MB/step`) across ambient input dimensions **`d_0 = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]`** (`C = 3`, `N = 96`, hidden layers `[16, 16]`—matching Section 5.1 of Notebook `08` and extending $32\times$ higher to `d_0 = 4096`):
 - **Notebook `08` Baselines** (evaluated up to `d_0 = 128` before multi-GB growth):
   1. `Nb08 DeWitt CoordFD ((d_0+1)N)` (`O(N d_0^2)`),
-  2. `Nb08 Barrier CoordFD ((d_0+1)N)` (`O(k N d_0^2)` — `1.79 GB` at `d_0 = 128`),
-  3. `Nb08 Coupled Subspace (jacfwd, 2nd-θ)` (`O(N P(d_0) + P^2)` — `4.34 GB` at `d_0 = 128`).
-- **Notebook `09` Memory-Scalable Formulations** (evaluated all the way to **`d_0 = 512`**):
+  2. `Nb08 Barrier CoordFD ((d_0+1)N)` (`O(k N d_0^2)` — `> 1.1 GB` at `d_0 = 128`),
+  3. `Nb08 Coupled Subspace (jacfwd, 2nd-θ)` (`O(N P(d_0) + P^2)` — `> 1.7 GB` at `d_0 = 128`).
+- **Notebook `09` Memory-Scalable Formulations** (evaluated all the way to **`d_0 = 2048` and `4096`**):
   4. `Log-Fibered Hyperboloid DeWitt (3N, Q_0)`,
   5. `Midpoint Polygonal Barrier (3N)`,
   6. `Analytic Head Coupled Subspace (3N, 1st-θ)`,
@@ -5288,14 +5302,14 @@ We benchmark step latency (`ms/step`) and CPU autograd memory allocation (`MB/st
   alongside `SGD + Cross-Entropy (1N)`.
 
 ### How to Interpret the Table & Log–Log Scaling Plots
-- **Dashed Curves (Notebook `08` Baselines)**: Climb with steep $O(d_0)$–$O(d_0^2)$ slopes into hundreds of megabytes and gigabytes by `d_0 = 128`.
-- **Solid Curves (Notebook `09` Scalable Methods)**: Remain **nearly flat ($O(1)$ in $d_0$, growing only with the unavoidable input batch `X` and first-layer weights `W_0`)** all the way to **`d_0 = 512`**, staying under **`~3–9 MB`** (`> 1,000x` memory reduction!).
+- **Dashed Curves (Notebook `08` Baselines)**: Climb with steep $O(d_0)$–$O(d_0^2)$ slopes into gigabytes by `d_0 = 128`.
+- **Solid Curves (Notebook `09` Scalable Methods)**: Scale gently and linearly only with the input batch `X` (`N * d_0`) and first-layer weights `W_0` (`d_0 * 16`) all the way through **`d_0 = 2048` and `4096`**, staying under **`~16–35 MB`** where coordinate-FD / `jacfwd` baselines would exceed hundreds of gigabytes!
 """,
         },
         {
             "type": "code",
             "source": r"""
-dims_s3 = [2, 8, 32, 64, 128, 256, 512]
+dims_s3 = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
 N_s3 = 96
 K3_s3, sp3_s3, up3_s3 = build_log_fiber_prototypes(3, tau=0.80)
 _, pisq3_s3 = build_dewitt_simplex_prototypes(3, tau=0.75)
@@ -5419,43 +5433,43 @@ for col_i, (ylbl, ttl) in enumerate([
     axes[col_i].set_xscale("log", base=2)
     axes[col_i].set_yscale("log")
     axes[col_i].set_xticks(dims_s3)
-    axes[col_i].set_xticklabels([str(v) for v in dims_s3])
+    axes[col_i].set_xticklabels([str(v) for v in dims_s3], fontsize=8.0, rotation=25)
     axes[col_i].set_xlabel(r"Input Dimension $d_0$ ($C = 3, N = 96$)")
     axes[col_i].set_ylabel(ylbl)
     axes[col_i].set_title(ttl)
     axes[col_i].grid(alpha=0.3, which="both")
 axes[0].legend(fontsize=7.8, loc="upper left")
-plt.suptitle("Notebook 08 Baselines (Dashed) vs. Notebook 09 Scalable Formulations (Solid) up to d_0 = 512", y=1.03, fontsize=13)
+plt.suptitle("Notebook 08 Baselines (Dashed) vs. Notebook 09 Scalable Formulations (Solid) up to d_0 = 4096", y=1.03, fontsize=13)
 plt.tight_layout()
 plt.show()
 """,
         },
         {
             "type": "markdown",
-            "source": r"""## 4. Scaling Experiment 2 — Latency & Memory vs. Number of Classes ($C = 2 \to 256$)
+            "source": r"""## 4. Scaling Experiment 2 — Latency & Memory vs. Number of Classes ($C = 2 \to 4096$)
 
 ### What This Experiment Does
-We benchmark step latency (`ms/step`) and memory (`MB/step`) as the number of categorical classes grows across **`C = [2, 4, 8, 16, 32, 64, 128, 256]`** (`d_0 = 2`, `N = 256`), comparing:
+We benchmark step latency (`ms/step`) and memory (`MB/step`) as the number of categorical classes grows across **`C = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]`** (`d_0 = 2`, `N = 256`), comparing:
 - **Notebook `08` Baselines**:
-  1. `Nb08 DeWitt One-Hot (Sym^+_2)^C (d_L = 2C)` (evaluated up to `C = 128` where memory already exceeds `130 MB`),
+  1. `Nb08 DeWitt One-Hot (Sym^+_2)^C (d_L = 2C)` (evaluated up to `C = 128`),
   2. `Nb08 Coupled Subspace (jacfwd, O(N^2))`.
-- **Notebook `09` Memory-Scalable Formulations** (evaluated all the way to **`C = 256`**):
-  3. `Nb09 LogFib Hyperboloid DeWitt (d_L = 2 ceil(log2 C), m_neg = 8)` (`O(N log C)` memory, zero crowding),
+- **Notebook `09` Memory-Scalable Formulations** (evaluated all the way through **`C = 2048` and `4096`**):
+  3. `Nb09 LogFib Hyperboloid DeWitt (d_L = 2 ceil(log2 C), m_neg = 8)` (`O(N log C)` memory, zero crowding, `d_L = 24` at `C = 4096`),
   4. `Nb09 Midpoint Polygonal Barrier (d_L = 2)` (`O(1)` memory in $C$),
   5. `Nb09 Analytic Head Subspace + Gram (d_L = 2)` (`O(1)` network + $r \times r$ Gram trace),
   6. `Nb09 ParamFD Subspace + Gram (r = 6, d_L = 2)` (`6 x 6` Gram trace),
   alongside `SGD + Cross-Entropy (d_L = C)`.
 
 ### How to Interpret the Table & Log–Log Scaling Plots
-- **`Nb09 Midpoint Polygonal Barrier`** stays **strictly flat (`~1.4 MB`)** across the entire $128\times$ jump from `C = 2` to `C = 256`—even using **less memory than `SGD + Cross-Entropy` (`2.3 MB`) at `C = 256`** because its output layer stays `d_L = 2` rather than `256`!
-- **`Nb09 LogFib Hyperboloid DeWitt`** bends the steep linear curve of `Nb08 One-Hot (Sym^+_2)^C` into a gentle **logarithmic curve** (`8.7 MB` at `C = 256` with `d_L = 16`, vs. `> 260 MB` and `d_L = 512` for one-hot fibers) while retaining standalone nearest-prototype test inference.
-- **`Nb09 Analytic Head` & `ParamFD Subspace + Gram`** replace both `jacfwd` and the $O(C^2)$ class-pair matrix with the $r \times r$ Gram trace identity, cutting memory by **`~6x–9x`** at `d_0 = 2` (and **`> 250x`** when $d_0$ is also large, as shown next in Section 5).
+- **The Crossover Above `C = 1024`**: Notice that as $C$ reaches **`2048` and `4096`**, `SGD + Cross-Entropy (d_L = C)` climbs linearly (`~16.5 MB` at `2048`, `~32.8 MB` at `4096`) because it must materialize $(N, C)$ logits and softmax gradients—crossing **above ALL FOUR scalable geometric losses**!
+  - **`Nb09 Midpoint Polygonal Barrier`** stays **strictly flat at `1.42 MB`** (`> 23x` *less* memory than `SGD + Cross-Entropy` at `C = 4096`).
+  - **`Nb09 ParamFD Subspace + Gram` (`11.70 MB`), `Nb09 LogFib Hyperboloid DeWitt` (`~13.1 MB`), and `Nb09 Analytic Head Subspace + Gram` (`18.95 MB`)** all use **substantially less memory than `SGD + Cross-Entropy` at `C = 4096`**.
 """,
         },
         {
             "type": "code",
             "source": r"""
-cls_s4 = [2, 4, 8, 16, 32, 64, 128, 256]
+cls_s4 = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
 N_s4 = 256
 X_s4 = torch.randn(N_s4, 2)
 Q0_s4 = compute_canonical_2frame(X_s4)
@@ -5475,7 +5489,7 @@ for c_cnt in cls_s4:
     y_c = torch.arange(N_s4) % c_cnt
     y_pair = torch.arange(N_s4) % min(c_cnt, N_s4 // 2)
     ss_c, ds_c, sd_c, dd_c = build_metric_barrier_pairs(X_s4, y_pair, k_same=1, k_diff=4)
-    K_c, sp_c, up_c = build_log_fiber_prototypes(c_cnt, tau=0.80)
+    K_c, sp_c, up_c = proto_cache_nb09[c_cnt] if c_cnt in proto_cache_nb09 else build_log_fiber_prototypes(c_cnt, tau=0.80)
 
     net_ce = MoonsMLP(layer_dims=[2, 16, 16, c_cnt], activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
     net_2d = MoonsMLP(layer_dims=[2, 16, 32, 2], activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
@@ -5556,35 +5570,35 @@ for col_i, (ylbl, ttl) in enumerate([
     axes[col_i].set_xscale("log", base=2)
     axes[col_i].set_yscale("log")
     axes[col_i].set_xticks(cls_s4)
-    axes[col_i].set_xticklabels([str(v) for v in cls_s4])
+    axes[col_i].set_xticklabels([str(v) for v in cls_s4], fontsize=8.0, rotation=25)
     axes[col_i].set_xlabel(r"Number of Classes $C$ ($d_0 = 2, N = 256$)")
     axes[col_i].set_ylabel(ylbl)
     axes[col_i].set_title(ttl)
     axes[col_i].grid(alpha=0.3, which="both")
 axes[0].legend(fontsize=7.8, loc="upper left")
-plt.suptitle("Many-Class Scaling up to C = 256: Notebook 08 (Dashed) vs. Notebook 09 (Solid)", y=1.03, fontsize=13)
+plt.suptitle("Many-Class Scaling up to C = 4096: Notebook 08 (Dashed) vs. Notebook 09 (Solid)", y=1.03, fontsize=13)
 plt.tight_layout()
 plt.show()
 """,
         },
         {
             "type": "markdown",
-            "source": r"""## 5. Joint High-Dimensional + Many-Class Diagonal Stress Test ($d_0 = C$ from $4$ to $256$)
+            "source": r"""## 5. Joint High-Dimensional + Many-Class Diagonal Stress Test ($d_0 = C$ from $4$ to $4096$)
 
 ### What This Experiment Does
-In real-world representation learning, ambient feature dimension $d_0$ and class count $C$ grow **simultaneously**. Along the joint diagonal **`(d_0, C) in [(4, 4), (16, 16), (64, 64), (128, 128), (256, 256)]`** (`N = 256`, hidden layers `[32, 32]`), Notebook `08`'s coordinate-FD and `jacfwd` baselines compound multiplicatively into **multi-gigabyte to tens-of-gigabytes** allocations. Here we run all four Notebook `09` scalable formulations simultaneously up to **`(d_0 = 256, C = 256)`**.
+In real-world representation learning, ambient feature dimension $d_0$ and class count $C$ grow **simultaneously**. Along the joint diagonal **`(d_0, C) in [(4, 4), (16, 16), (64, 64), (128, 128), (256, 256), (512, 512), (1024, 1024), (2048, 2048), (4096, 4096)]`** (`N = 256`, hidden layers `[32, 32]`), Notebook `08`'s coordinate-FD and `jacfwd` baselines would require **hundreds of gigabytes to terabytes** of memory. Here we run all four Notebook `09` scalable formulations simultaneously up to **`(d_0 = 4096, C = 4096)`**.
 
 ### How to Interpret the Joint Diagonal Table, Plots & Practical Selection Guide
-- Even at **`(d_0 = 256, C = 256)`**, every scalable coupled method runs in **`~2–20 ms/step`** and **`~5–25 MB/step`**:
-  - **Choose `Log-Fibered Hyperboloid DeWitt`** when you want **standalone $O(1)$-anchor-free test inference** ($\arg\min_c d_{\mathrm{AI}}(\mathbf{g}(x^*), \mathbf{G}^*_c)$), exact $E(2)^K$ invariance, and $O(\log C)$ output width (`d_L = 16` at `C = 256`).
-  - **Choose `Midpoint Polygonal Geodesic Barrier`** when you want the **lowest possible memory and latency (`O(1)` in both $d_0$ and $C$, `~5.5 MB` at `256 x 256`)** and intrinsic geodesic basin geometry.
+- Even at **`(d_0 = 4096, C = 4096)`**, every scalable coupled method runs smoothly in compact memory (`~75–120 MB`, within `~2–3x` of `SGD + Cross-Entropy`'s `~36 MB`):
+  - **Choose `Log-Fibered Hyperboloid DeWitt`** when you want **standalone $O(1)$-anchor-free test inference** ($\arg\min_c d_{\mathrm{AI}}(\mathbf{g}(x^*), \mathbf{G}^*_c)$), exact $E(2)^K$ invariance, and $O(\log C)$ output width (`d_L = 24` at `C = 4096`, vs. `4096` Cross-Entropy logits!).
+  - **Choose `Midpoint Polygonal Geodesic Barrier`** when you want the **lowest possible memory and latency (`O(1)` in both $d_0$ and $C$)** and intrinsic geodesic basin geometry.
   - **Choose `Analytic Head` or `Sketched Param-FD Coupled Subspace + Gram`** when you explicitly want **parameter-space Grassmannian orthogonality** ($\mathcal{V}_a \perp_{G^\Theta} \mathcal{V}_b$) so class updates do not interfere in parameter space $\Theta$.
 """,
         },
         {
             "type": "code",
             "source": r"""
-joint_grid = [4, 16, 64, 128, 256]
+joint_grid = [4, 16, 64, 128, 256, 512, 1024, 2048, 4096]
 N_s5 = 256
 gen_s5 = torch.Generator().manual_seed(505)
 
@@ -5602,7 +5616,7 @@ for dc in joint_grid:
     y_jp = torch.arange(N_s5) % min(dc, N_s5 // 2)
     Q0_j = compute_canonical_2frame(X_j)
     ss_j, ds_j, sd_j, dd_j = build_metric_barrier_pairs(X_j, y_jp, k_same=1, k_diff=4)
-    K_j, sp_j, up_j = build_log_fiber_prototypes(dc, tau=0.80)
+    K_j, sp_j, up_j = proto_cache_nb09[dc] if dc in proto_cache_nb09 else build_log_fiber_prototypes(dc, tau=0.80)
 
     net_ce = MoonsMLP(layer_dims=[dc, 32, 32, dc], activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
     net_2d = MoonsMLP(layer_dims=[dc, 32, 32, 2], activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
@@ -5658,19 +5672,19 @@ for name, d in s5_methods.items():
     axes[1].plot(joint_grid, d["mb"], marker=d["mk"], color=d["col"], ls=d["ls"], lw=2.3, label=name)
 
 for col_i, (ylbl, ttl) in enumerate([
-    ("Step Latency (ms / SGD step)", r"Joint Diagonal Latency ($d_0 = C = 4 \to 256$)"),
-    ("Step Memory (MB / SGD step)", r"Joint Diagonal Memory ($d_0 = C = 4 \to 256$)"),
+    ("Step Latency (ms / SGD step)", r"Joint Diagonal Latency ($d_0 = C = 4 \to 4096$)"),
+    ("Step Memory (MB / SGD step)", r"Joint Diagonal Memory ($d_0 = C = 4 \to 4096$)"),
 ]):
     axes[col_i].set_xscale("log", base=2)
     axes[col_i].set_yscale("log")
     axes[col_i].set_xticks(joint_grid)
-    axes[col_i].set_xticklabels([f"{v}x{v}" for v in joint_grid])
+    axes[col_i].set_xticklabels([f"{v}x{v}" for v in joint_grid], fontsize=7.8, rotation=25)
     axes[col_i].set_xlabel(r"Simultaneous Input Dim & Class Count $(d_0 \times C)$")
     axes[col_i].set_ylabel(ylbl)
     axes[col_i].set_title(ttl)
     axes[col_i].grid(alpha=0.3, which="both")
 axes[0].legend(fontsize=8.0, loc="upper left")
-plt.suptitle("Simultaneous High-Dimension + Many-Class Scaling up to (d_0 = 256, C = 256)", y=1.03, fontsize=13)
+plt.suptitle("Simultaneous High-Dimension + Many-Class Scaling up to (d_0 = 4096, C = 4096)", y=1.03, fontsize=13)
 plt.tight_layout()
 plt.show()
 """,
