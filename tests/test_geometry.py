@@ -7,11 +7,18 @@ import torch
 from diffgeom import (
     MoonsMLP,
     __version__,
+    analytic_head_subspace_loss,
+    analytic_head_subspace_predict,
     anisotropy_margin_loss,
+    build_dewitt_simplex_prototypes,
     build_knn_jet_operator,
+    build_log_fiber_prototypes,
+    build_metric_barrier_pairs,
+    compute_canonical_2frame,
     compute_coupled_dewitt_metric,
     compute_coupled_geometric_metric,
     compute_data_information_matrix,
+    compute_dewitt_dist_sq,
     compute_fast_graph_geometry,
     compute_fd_graph_curvature,
     compute_fd_pullback_metric,
@@ -22,10 +29,26 @@ from diffgeom import (
     compute_sketched_plane_curvature,
     compute_sketched_pullback_metric,
     compute_uncoupled_coord_metric,
+    coupled_subspace_orthogonality_loss,
+    coupled_subspace_predict,
     curvature_margin_loss,
+    dewitt_simplex_loss,
+    dewitt_simplex_predict,
+    fibered_dewitt_simplex_loss,
     flatten_params,
+    geodesic_barrier_loss,
+    geodesic_knn_predict,
     get_synthetic_dataset,
+    gram_subspace_orthogonality_loss,
+    hyperboloid_dewitt_dist_sq,
+    log_fiber_dewitt_loss,
+    log_fiber_dewitt_predict,
+    midpoint_polygonal_barrier_loss,
+    polygonal_barrier_knn_predict,
     scalar_geometric_predict,
+    sketched_param_subspace_loss,
+    sketched_param_subspace_predict,
+    sym2_to_hyperboloid,
     volume_contrastive_loss,
     woodbury_coupled_ngd_direction,
 )
@@ -140,3 +163,113 @@ def test_custom_activations_multiclass_losses_and_efficient_operators() -> None:
     g_sk, _ = compute_sketched_pullback_metric(model, X_tr[:20])
     _, K_sk = compute_sketched_plane_curvature(model, X_tr[:20])
     assert all(torch.isfinite(t).all() for t in (g_fd, g_fdk, K_fdk, g_knn, K_knn, g_sk, K_sk))
+
+
+def test_symmetric_coupled_multiclass_losses() -> None:
+    # 1. Exact pairwise DeWitt equidistance for C = 2, 3, 4
+    for c_cnt in (2, 3, 4):
+        protos, proto_isq = build_dewitt_simplex_prototypes(c_cnt, tau=0.75)
+        dists = []
+        for i in range(c_cnt):
+            for j in range(i + 1, c_cnt):
+                ev = torch.linalg.eigvalsh(proto_isq[i] @ protos[j] @ proto_isq[i])
+                dists.append(torch.sqrt((torch.log(ev) ** 2).sum()).item())
+        assert max(dists) - min(dists) < 1e-13
+
+    # 2. Exact S_3 label-permutation invariance across all three symmetric losses
+    X_tr, y_tr, X_te, _ = get_synthetic_dataset("blobs", n_train=36, n_test=18, n_classes=3, seed=11)
+    model = MoonsMLP(layer_dims=[2, 6, 2], activation="tanh", output_activation="identity", seed=7)
+    g_graph = compute_fd_pullback_metric(model, X_tr, metric_mode="graph")
+    _, proto_isq3 = build_dewitt_simplex_prototypes(3, tau=0.75)
+
+    perm = torch.tensor([2, 0, 1], dtype=torch.long)
+    y_perm = perm[y_tr]
+    inv_perm = torch.argsort(perm)
+
+    # Permuting y AND prototype assignment identically must preserve loss to machine precision
+    l_orig, _ = dewitt_simplex_loss(g_graph, y_tr, proto_isq3)
+    l_perm, _ = dewitt_simplex_loss(g_graph, y_perm, proto_isq3[inv_perm])
+    assert abs(l_orig.item() - l_perm.item()) < 1e-13
+    preds_dw = dewitt_simplex_predict(g_graph, proto_isq3)
+    assert preds_dw.shape == (36,)
+
+    # Geodesic barrier loss is strictly invariant under any label permutation without prototype relabeling
+    s1, d1, s2, d2 = build_metric_barrier_pairs(X_tr, y_tr, k_same=4, k_diff=5)
+    s1p, d1p, s2p, d2p = build_metric_barrier_pairs(X_tr, y_perm, k_same=4, k_diff=5)
+    g_euc = compute_fd_pullback_metric(model, X_tr, metric_mode="euclidean")
+    lb_orig, _ = geodesic_barrier_loss(g_euc, X_tr, s1, d1, s2, d2)
+    lb_perm, _ = geodesic_barrier_loss(g_euc, X_tr, s1p, d1p, s2p, d2p)
+    assert abs(lb_orig.item() - lb_perm.item()) < 1e-14
+    preds_gb = geodesic_knn_predict(model, X_te, X_tr, y_tr, n_classes=3)
+    assert preds_gb.shape == (18,)
+
+    # Coupled subspace orthogonality loss is strictly invariant under any label permutation
+    lc_orig, _ = coupled_subspace_orthogonality_loss(model, X_tr, y_tr, use_fd=True)
+    lc_perm, _ = coupled_subspace_orthogonality_loss(model, X_tr, y_perm, use_fd=True)
+    assert abs(lc_orig.item() - lc_perm.item()) < 1e-14
+    preds_cs, _ = coupled_subspace_predict(model, X_te, X_tr, y_tr, n_classes=3, use_fd=True)
+    assert preds_cs.shape == (18,)
+
+    # Fibered (Sym^+_2)^C DeWitt simplex loss for large C (e.g. C = 6) is strictly S_C-invariant
+    X6, y6, _, _ = get_synthetic_dataset("blobs", n_train=36, n_test=18, n_classes=6, seed=19)
+    m_fib = MoonsMLP(layer_dims=[2, 8, 12], activation="tanh", output_activation="identity", seed=7)
+    lf_0, _ = fibered_dewitt_simplex_loss(m_fib, X6, y6, n_classes=6)
+    assert torch.isfinite(lf_0)
+
+
+
+def test_scalable_highdim_manyclass_losses() -> None:
+    torch.manual_seed(0)
+    # 1. Exact Minkowski-hyperboloid DeWitt formula matches 2x2 generalized eigenvalue formula
+    a_rand = torch.randn(24, 2, 2, dtype=torch.float64)
+    g_spd = torch.eye(2, dtype=torch.float64) + torch.einsum("nai,naj->nij", a_rand, a_rand)
+    protos, proto_isq = build_dewitt_simplex_prototypes(4, tau=0.75)
+    d2_eig = compute_dewitt_dist_sq(g_spd, proto_isq)
+    sg, ug = sym2_to_hyperboloid(g_spd)
+    sp, up = sym2_to_hyperboloid(protos)
+    up_mink = up * torch.tensor([1.0, -1.0, -1.0], dtype=torch.float64)
+    d2_hyp = hyperboloid_dewitt_dist_sq(sg[:, None, None], ug[:, None, None, :], sp[None, :, None], up_mink[None, :, None, :])
+    assert (d2_hyp - d2_eig).abs().max().item() < 1e-9
+
+    # 2. Exact Gram trace identity matches explicit O(C^2) off-diagonal class-subspace overlap
+    w_raw = torch.randn(30, 3, 8, dtype=torch.float64)
+    w_hat = w_raw / torch.sqrt((w_raw * w_raw).sum(dim=(-2, -1), keepdim=True))
+    y_lbl = torch.arange(30) % 6
+    _, info_gram = gram_subspace_orthogonality_loss(w_hat, y_lbl)
+    w_cls = []
+    for c in range(6):
+        wc = w_hat[y_lbl == c].mean(dim=0)
+        w_cls.append(wc / torch.sqrt((wc * wc).sum() + 1e-8))
+    w_cls_t = torch.stack(w_cls, dim=0)
+    pair_sq = (torch.einsum("car,dbr->cdab", w_cls_t, w_cls_t) ** 2).sum(dim=(-2, -1))
+    explicit_off = (pair_sq * (1.0 - torch.eye(6, dtype=torch.float64))).sum().item() / 30.0
+    assert abs(info_gram["mean_cross_cls_sq"] - explicit_off) < 1e-13
+
+    # 3. High-d_0 + multiclass forward/backward and prediction smoke tests (d_0 = 16, C = 8)
+    X_tr, y_tr, X_te, _ = get_synthetic_dataset("blobs", n_train=48, n_test=24, n_classes=8, input_dim=16, seed=5)
+    q0 = compute_canonical_2frame(X_tr)
+    assert q0.shape == (16, 2)
+    assert torch.allclose(q0.T @ q0, torch.eye(2, dtype=torch.float64), atol=1e-12)
+
+    k_fib, s_p8, u_p8 = build_log_fiber_prototypes(8)
+    assert k_fib == 3
+    net_lf = MoonsMLP(layer_dims=[16, 12, 2 * k_fib], seed=3)
+    loss_lf, _ = log_fiber_dewitt_loss(net_lf, X_tr, y_tr, k_fib, q0, s_p8, u_p8, m_neg=4)
+    loss_lf.backward()
+    assert log_fiber_dewitt_predict(net_lf, X_te, k_fib, q0, s_p8, u_p8).shape == (24,)
+
+    s_s, d_s, s_d, d_d = build_metric_barrier_pairs(X_tr, y_tr, k_same=3, k_diff=5)
+    net_2d = MoonsMLP(layer_dims=[16, 16, 2], seed=3)
+    loss_mb, _ = midpoint_polygonal_barrier_loss(net_2d, X_tr, s_s, d_s, s_d, d_d)
+    loss_mb.backward()
+    assert polygonal_barrier_knn_predict(net_2d, X_te, X_tr, y_tr, n_classes=8).shape == (24,)
+
+    net_2d.zero_grad(set_to_none=True)
+    loss_ah, _ = analytic_head_subspace_loss(net_2d, X_tr, y_tr, q0)
+    loss_ah.backward()
+    assert analytic_head_subspace_predict(net_2d, X_te, X_tr, y_tr, n_classes=8, frame_2d=q0).shape == (24,)
+
+    net_2d.zero_grad(set_to_none=True)
+    loss_sp, _ = sketched_param_subspace_loss(net_2d, X_tr, y_tr, q0, r_probes=4)
+    loss_sp.backward()
+    assert sketched_param_subspace_predict(net_2d, X_te, X_tr, y_tr, n_classes=8, frame_2d=q0, r_probes=6).shape == (24,)

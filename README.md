@@ -122,10 +122,12 @@ diffgeom/
 │   ├── 04_purely_geometric_curvature_losses.ipynb            # End-to-end 3rd-order autodiff training with K < 0 vs. K > 0
 │   ├── 05_geometric_loss_ablations_and_synthesis.ipynb       # Comparison of curvature, volume & anisotropy losses + compute/memory costs
 │   ├── 06-coupled-optimization.ipynb                         # Coupled parameter-data metric Natural GD vs. uncoupled baselines
-│   └── 07-evaluating-efficient-training.ipynb                # 1st-order efficient geometric approximations vs. SGD Cross-Entropy baseline
+│   ├── 07-evaluating-efficient-training.ipynb                # 1st-order efficient geometric approximations vs. SGD Cross-Entropy baseline
+│   ├── 08-symmetric-coupled-multiclass.ipynb                 # S_C-symmetric coupled multiclass losses vs. 1D bands + compute/memory audit
+│   └── 09-scalable-coupled-multiclass.ipynb                  # O(1)/O(log C)-memory coupled geometric losses up to d_0 = 512 and C = 256
 ├── scripts/
 │   ├── nb_executor.py                                        # Headless notebook builder & executor with inline PNG capture
-│   └── build_all_notebooks.py                                # Rebuilds and executes all 7 notebooks end-to-end
+│   └── build_all_notebooks.py                                # Rebuilds and executes all 9 notebooks end-to-end
 └── assets/
     ├── decision_landscapes.png                               # 4-panel comparison of learned geometric decision boundaries
     ├── geometric_fields_matrix_3x4.png                       # 3x4 matrix of final-layer curvature, log volume & anisotropy across experiments
@@ -152,7 +154,7 @@ uv run jupyter notebook --no-browser --port 8888
 ```
 
 ### 2. Shared Experiment Configuration (`config.yaml`)
-All seven notebooks (`01` through `07`) read their experiment settings at startup from `config.yaml` at the project root:
+All nine notebooks (`01` through `09`) read their experiment settings at startup from `config.yaml` at the project root:
 1. **Toy Synthetic Dataset (`dataset.name`, `dataset.n_classes: 2`, `dataset.params`)**: Choose among `"moons"`, `"circles"`, `"blobs"`, `"classification"`, and `"gaussian_quantiles"` from `scikit-learn` along with `noise`, `n_train`, `n_test`, `seed`, `n_classes` (default `2`), and generator-specific options (`factor`, `cluster_std`, `class_sep`, `cov`).
 2. **Layer Architecture (`model.layer_dims`)**: Any integer sequence `[input_dim, *hidden_dims, output_dim]` (default `[2, 5, 10, 15, 10, 2]`).
 3. **Hidden & Output Activations (`model.hidden_activation`, `model.output_activation`)**: Independently configurable hidden and output nonlinearities (`"tanh"`, `"gelu"`, `"silu"`, `"softplus"`, `"elu"`, `"sigmoid"`, `"sin"`, `"relu"`, `"identity"`, `"softmax"`, `"log_softmax"`).
@@ -162,6 +164,6 @@ All seven notebooks (`01` through `07`) read their experiment settings at startu
 # Run unit tests
 uv run pytest
 
-# Rebuild & execute all 7 notebooks (or pass specific numbers, e.g. `uv run diffgeom-build-notebooks 6 7`)
+# Rebuild & execute all 9 notebooks (or pass specific numbers, e.g. `uv run diffgeom-build-notebooks 8 9`)
 uv run diffgeom-build-notebooks
 ```

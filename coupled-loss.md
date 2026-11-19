@@ -729,3 +729,340 @@ In the top-right **Select Kernel** picker of any notebook, choose **Python Envir
 ```bash
 uv run python -m ipykernel install --user --name diffgeom --display-name "Python (diffgeom)"
 ```
+
+
+---
+
+## Turn 21
+
+### User
+hos is multiclass classification formulated when using geometric losses ... like in what regions of metric volume, anisotropy or curvature is each class targetted to fall into
+
+### Assistant
+Because each purely geometric loss computes a **single scalar differential invariant** $\psi(x; \theta) \in \mathbb{R}$ from the final-layer pullback metric $g^{(L)}(x; \theta)$ (rather than $C$ separate coordinate logits), **$C$-class classification (`n_classes = C`) is formulated by partitioning the 1D geometric spectrum $\mathbb{R}$ into $C$ ordered, margin-separated bands** (`_scalar_geometric_margin_loss_and_weights` and `scalar_geometric_predict` in [src/diffgeom/geometry.py](src/diffgeom/geometry.py)).
+
+---
+
+### 1. General Band Layout on $\psi(x)$ for $C$ Classes
+
+For a chosen margin $\tau > 0$, each class $c \in \{0, 1, \dots, C - 1\}$ is assigned a symmetric target center $t_c$ spaced by $2\tau$, with midpoint decision boundaries $b_c$:
+$$t_c = 2\tau\left(c - \frac{C - 1}{2}\right), \qquad b_c = \frac{t_c + t_{c+1}}{2} = 2\tau\left(c + \frac{1}{2} - \frac{C - 1}{2}\right)$$
+
+- **Class `0` (lowest class)**: Targets the **open left ray** $(-\infty,\; t_0 + \tfrac{\tau}{2}]$ (one-sided penalty—more negative is free).
+- **Interior classes (`0 < c < C - 1`)**: Target **bounded intervals** $[t_c - \tfrac{\tau}{2},\; t_c + \tfrac{\tau}{2}]$ of width $\tau$ (two-sided soft-tube penalty so they stay inside their assigned band without spilling into Class $c-1$ or Class $c+1$).
+- **Class `C - 1` (highest class)**: Targets the **open right ray** $[t_{C-1} - \tfrac{\tau}{2},\; +\infty)$ (one-sided penalty—more positive is free).
+- *(For binary `C = 2`, this simplifies to $(-\infty, -\tau]$ vs. $[+\tau, +\infty)$ separated at `0`.)*
+
+Visually along the $\psi(x)$ axis for **`C = 3`** and **`C = 4`**:
+```text
+C = 3 (centers -2τ, 0, +2τ | decision boundaries at -τ and +τ):
+  Class 0 target          gap      Class 1 target     gap          Class 2 target
+<=================] . . . | . . . [==============] . . . | . . . [=================>
+                -1.5τ    -τ    -0.5τ     0     +0.5τ    +τ     +1.5τ
+
+C = 4 (centers -3τ, -τ, +τ, +3τ | decision boundaries at -2τ, 0, +2τ):
+  Class 0      gap     Class 1     gap     Class 2     gap       Class 3
+<=========] . . | . . [=======] . . | . . [=======] . . | . . [=========>
+        -2.5τ  -2τ  -1.5τ   -0.5τ   0   +0.5τ   +1.5τ  +2τ  +2.5τ
+```
+
+---
+
+### 2. Concrete Geometric Regimes Targeted by Each Loss
+
+Below is what those $\psi$-bands mean geometrically for **`C = 3` classes** (and **`C = 4`**) using the notebook margins:
+
+| Geometric Loss & Scalar $\psi(x)$ | Class `0` Target Region (`y = 0`) | Class `1` Target Region (`y = 1`, interior) | Class `2` Target Region (`y = 2`) | What Happens for `C = 4` Classes |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. Volume-Element** (`margin τ = 0.60`)<br>$\psi_{\mathrm{vol}} = \log\sqrt{\det g(x)}$<br>*(Area factor $\sqrt{\det g} = e^{\psi_{\mathrm{vol}}}$)* | **Strongly contractive basin**<br>$\psi_{\mathrm{vol}} \le -0.90$<br>Local area shrunk to $\sqrt{\det g} \le 0.41\times$ *(predicted if $\le 0.55\times$)* | **Equiareal / area-preserving sheet**<br>$\psi_{\mathrm{vol}} \in [-0.30, +0.30]$<br>Local area near unity: $\sqrt{\det g} \in [0.74\times, 1.35\times]$ | **Strongly expansive region**<br>$\psi_{\mathrm{vol}} \ge +0.90$<br>Local area stretched to $\sqrt{\det g} \ge 2.46\times$ *(predicted if $> 1.82\times$)* | Splits around $\det g = 1$ into: **strong contraction** ($\le -1.5$), **mild contraction** ($[-0.9, -0.3]$), **mild expansion** ($[+0.3, +0.9]$), **strong expansion** ($\ge +1.5$). |
+| **2. Metric Anisotropy** (`margin τ = 0.45`)<br>$\psi_{\mathrm{aniso}} = \log\frac{g_{11}(x)}{g_{22}(x)}$<br>*(With $\det g \approx 1$ area anchor)* | **Vertical-dominant shear**<br>$\psi_{\mathrm{aniso}} \le -0.675$<br>$g_{11}/g_{22} \le 0.51$ ($x^2$ stretched, $x^1$ compressed) | **Conformal / isotropic band**<br>$\psi_{\mathrm{aniso}} \in [-0.225, +0.225]$<br>$g_{11} \approx g_{22}$ ($g_{11}/g_{22} \in [0.80, 1.25]$, circles stay near-circles) | **Horizontal-dominant shear**<br>$\psi_{\mathrm{aniso}} \ge +0.675$<br>$g_{11}/g_{22} \ge 1.96$ ($x^1$ stretched, $x^2$ compressed) | Splits around $g_{11}=g_{22}$ into: **strong vertical stretch**, **mild vertical stretch**, **mild horizontal stretch**, **strong horizontal stretch**. |
+| **3. Gaussian Curvature** (`margin τ = 0.40`)<br>$\psi_{\mathrm{curv}} = K_{\max}\tanh\!\left(\frac{K(x)}{K_{\max}}\right)$<br>*($\psi_{\mathrm{curv}} \approx K$ when $|K| \ll K_{\max}$)* | **Hyperbolic saddle**<br>$K(x) \lesssim -0.60$<br>Principal curvatures $\kappa_1, \kappa_2$ have opposite signs | **Flat / parabolic sheet**<br>$K(x) \in [-0.20, +0.20]$<br>Nearly zero intrinsic curvature ($K \approx 0$) | **Elliptic dome / bowl**<br>$K(x) \gtrsim +0.60$<br>Principal curvatures $\kappa_1, \kappa_2$ share the same sign | Splits around $K = 0$ into: **sharp saddles** ($\lesssim -1.0$), **gentle saddles** ($[-0.6, -0.2]$), **gentle domes** ($[+0.2, +0.6]$), **sharp domes** ($\gtrsim +1.0$). |
+
+---
+
+### 3. Geometric / Topological Consequence in Input Space
+Because $\psi(x; \theta)$ is a **smooth, continuous scalar field** over $x \in \mathbb{R}^2$ (like altitude on a topographic map), any continuous path in input space from a Class `0` region ($\psi \le -1.5\tau$) to a Class `2` region ($\psi \ge +1.5\tau$) must pass through the intermediate Class `1` interval $(-\tau, +\tau)$ by the Intermediate Value Theorem. When Class `0` and Class `2` clusters are adjacent in input space without Class `1` points between them, the network learns a narrow, steep transition crease between them while placing broad, flat plateaus at the target levels $t_c$ over the actual data clusters.
+
+
+---
+
+## Turn 22
+
+### User
+hos is multiclass classification formulated when using geometric losses ... like in what regions of metric volume, anisotropy or curvature is each class targetted to fall into
+
+*(Follow-up)*:
+this seems to induce an artificial ordering in the data space, cant we better profit from the parameter and data space coupling to define a more adequate loss without these artificial artifacts?
+
+### Assistant
+Yes—your intuition is spot on. Mapping $C$ unordered categorical classes onto a 1D scalar invariant $\psi(x) \in \mathbb{R}$ (`-2τ, 0, +2τ`) breaks **class permutation symmetry ($S_C$)** and creates two concrete artifacts for $C \ge 3$:
+1. **Artificial Metric Spacing**: Class `0` and Class `2` are forced twice as far apart ($4\tau$) as Class `0` and Class `1` ($2\tau$).
+2. **Intermediate-Value Theorem (IVT) Phantom Fringes**: Because $\psi(x; \theta)$ is continuous on $\mathbb{R}^2$, any path crossing directly from a Class `0` cluster ($\psi \le -1.5\tau$) to a Class `2` cluster ($\psi \ge +1.5\tau$) *must* pass through $\psi \in (-\tau, +\tau)$—creating a narrow phantom strip misclassified as Class `1` along the `0–2` border.
+
+By exploiting the **coupled geometry between the parameter manifold $(\Theta, G^\Theta)$ and the data manifold $(\mathcal{M}, g)$**, we can eliminate 1D ordering completely. Here are the **three most principled $S_C$-symmetric geometric loss constructions**, ordered by how directly they leverage the $\Theta \leftrightarrow \mathcal{M}$ coupling:
+
+---
+
+### 1. Coupled Parameter–Data Subspace Orthogonality (`DeWitt Tangent Kernel` on $\Theta \leftrightarrow \mathcal{M}$)
+This profits **directly** from the coupled metric structure in [src/diffgeom/geometry.py](src/diffgeom/geometry.py). Recall that our global DeWitt parameter metric is the expectation of a **pointwise pullback operator** $G^\Theta(x; \theta)$ at each data point $x$:
+$$G^{\Theta,\mathrm{DeWitt}}(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\big[G^\Theta(x; \theta)\big], \qquad G^\Theta(x; \theta) = U(x; \theta)^T U(x; \theta)$$
+where $U(x; \theta) \in \mathbb{R}^{3 \times P}$ stacks the 3 independent components of the whitened metric derivative $g(x)^{-1/2}\, \partial_\theta g(x)\, g(x)^{-1/2}$ (or $4 \times P$ when including $\nabla_\theta K(x)$).
+
+* **Key Geometric Idea**: Instead of assigning classes to numbers on $\mathbb{R}$, we assign classes to **mutually $G^\Theta$-orthogonal tangent subspaces** $\mathcal{V}_0 \perp_{G^\Theta} \mathcal{V}_1 \perp_{G^\Theta} \dots \perp_{G^\Theta} \mathcal{V}_{C-1}$ inside the high-dimensional parameter tangent space $T_\theta \Theta$ ($\dim \Theta = P \gg C$)!
+* **Coupled Loss Construction**: Define the normalized Riemannian subspace overlap (Grassmannian cosine similarity on $(\Theta, G^\Theta)$) between how $\theta$ deforms the data metric at $x_i$ vs. $x_j$:
+  $$\mathcal{K}_{\Theta \leftrightarrow \mathcal{M}}(x_i, x_j; \theta) = \frac{\left\| U(x_i; \theta)\,\big(G^{\Theta,\mathrm{DeWitt}}(\theta) + \lambda I_P\big)^{-1} U(x_j; \theta)^T \right\|_F^2}{\left\| U(x_i)\, (G^\Theta + \lambda I)^{-1} U(x_i)^T \right\|_F \cdot \left\| U(x_j)\, (G^\Theta + \lambda I)^{-1} U(x_j)^T \right\|_F} \in [0, 1]$$
+  $$\mathcal{L}_{\mathrm{coupled\text{-}ortho}}(\theta) = \mathbb{E}_{y_i = y_j}\!\big[1 - \mathcal{K}_{\Theta \leftrightarrow \mathcal{M}}(x_i, x_j)\big] + \mathbb{E}_{y_i \neq y_j}\!\big[\mathcal{K}_{\Theta \leftrightarrow \mathcal{M}}(x_i, x_j)^2\big] + \lambda_{\mathrm{vol}}\,\mathbb{E}_x\!\big[(\log\det g(x))^2\big]$$
+* **Why This Eliminates Every Artifact**:
+  1. **Exact $S_C$ Symmetry (scales to any $C \ll P$)**: In $\mathbb{R}^P$, $C$ subspaces can all be mutually $90^\circ$ orthogonal—every pair of classes $(c, c')$ is equidistant, even when the network output is just 2D ($d_L = 2$)!
+  2. **Zero IVT Phantom Fringes**: Moving in data space from Class `0` ($\mathcal{V}_0$) to Class `2` ($\mathcal{V}_2$) rotates $U(x)$ inside $\mathrm{span}(\mathcal{V}_0, \mathcal{V}_2)$, remaining **strictly orthogonal to $\mathcal{V}_1$** across the entire boundary.
+  3. **Exact $E(d_L)$ Gauge Invariance + Non-Interfering Optimization**: Built purely from $g^{-1/2}\partial_\theta g\, g^{-1/2}$, it quotients out rigid output motions $z \mapsto Qz + b$ AND block-diagonalizes $G^\Theta(\theta) \approx \bigoplus_{c=0}^{C-1} G^\Theta_c$, so Natural Gradient updates to Class $c$'s geometry do not interfere with Class $c'$!
+  4. **Purely Geometric Inference**: Classify $x^*$ by maximum subspace alignment $\hat{y}(x^*) = \arg\max_c \mathbb{E}_{x \in \mathcal{D}_c}[\mathcal{K}_{\Theta \leftrightarrow \mathcal{M}}(x^*, x)]$.
+
+---
+
+### 2. Equidistant Geodesic Simplex on the Metric Cone $(\mathrm{Sym}^+_d, d_{\mathrm{AI}})$ (Exact Dual of $G^{\Theta,\mathrm{DeWitt}}$)
+Even without pairwise comparisons, collapsing $g(x; \theta) \in \mathrm{Sym}^+_2$ to a 1D scalar $\psi(x)$ threw away 2 of its 3 degrees of freedom!
+* The space of $2 \times 2$ SPD metrics $\mathrm{Sym}^+_2$ equipped with the affine-invariant metric is isometric to $\mathbb{R}^+ \times \mathbb{H}^2$, where the unit-determinant slice ($\det g = 1$) is the **2D hyperbolic Poincaré disk $\mathbb{H}^2$** (parameterized by Tissot ellipse eccentricity and orientation angle).
+* For $C = 3$, place three target metrics $\{G^*_0, G^*_1, G^*_2\} \subset \mathrm{Sym}^+_2$ at the vertices of an **equilateral hyperbolic triangle**—identical area ($\det G^*_c = 1$) and identical anisotropy ($e^{2\tau}$), rotated by $\theta_c = 0^\circ, 60^\circ, 120^\circ$ (since ellipse axes are $\pi$-periodic, $0^\circ, 60^\circ, 120^\circ$ are mutually equidistant on $\mathbb{RP}^1$!):
+  $$G^*_c = R(\theta_c)\begin{pmatrix} e^\tau & 0 \\ 0 & e^{-\tau} \end{pmatrix} R(\theta_c)^T, \qquad \mathcal{L}_{\mathrm{DeWitt\text{-}simplex}}(\theta) = \frac{1}{N}\sum_{n=1}^N \left\|\log\!\Big((G^*_{y_n})^{-1/2}\, g(x_n; \theta)\, (G^*_{y_n})^{-1/2}\Big)\right\|_F^2$$
+* **Direct $\Theta \leftrightarrow \mathcal{M}$ Coupling**: The Generalized Gauss–Newton pullback of $\mathcal{L}_{\mathrm{DeWitt\text{-}simplex}}$ onto parameter space $\Theta$ **is literally the coupled DeWitt metric $G^{\Theta,\mathrm{DeWitt}}(\theta)$**! *(For $C > 3$, pulling back onto a width-$d$ representation gives $\mathrm{Sym}^+_d$ of dimension $d(d+1)/2$, hosting an equidistant $C$-simplex whenever $d(d+1)/2 \ge C$.)*
+
+---
+
+### 3. Relational Riemannian Metric-Barrier (Geodesic Contrastive) Loss on $\mathcal{M}$
+Instead of giving different classes *different* metric signatures, give **every class the exact same signature**—a locally flat, contracted geodesic basin ($\det g \ll 1$, $K \approx 0$)—separated from all other classes by **high-metric / high-curvature Riemannian walls**:
+$$\mathcal{L}_{\mathrm{barrier}}(\theta) = \mathbb{E}_{y_i = y_j}\!\Big[\Delta x_{ij}^T\, g(\bar{x}_{ij}; \theta)\, \Delta x_{ij}\Big] + \mathbb{E}_{y_i \neq y_j}\!\Big[\sigma_\beta\!\Big(\tau - \sqrt{\Delta x_{ij}^T\, g(\bar{x}_{ij}; \theta)\, \Delta x_{ij}}\Big)\Big]$$
+where $\Delta x_{ij} = x_j - x_i$ and $\bar{x}_{ij} = \frac{1}{2}(x_i + x_j)$ (or midpoint quadrature along segment $\overline{x_i x_j}$).
+* **Result**: Completely invariant to label permutations $S_C$ for **any** $C$, directly implements the singular-foliation geometry observed in Cross-Entropy networks (**Zavatone-Veth et al., 2023; Benfenati & Marta, 2023**) without using logits, and classifies test points via **Riemannian geodesic k-NN / basin distance** $d_g(x^*, x_i)$!
+
+
+---
+
+## Turn 23
+
+### User
+before implementing that, are these methods going to induce a penalty on computation time or memory?
+
+### Assistant
+They differ **dramatically** in compute and memory cost—one of them (**Method 1**) carries a heavy higher-order penalty, whereas **Method 2** (and **Method 3** with endpoint quadrature) has **essentially zero penalty (`~1.0x`)** relative to the current Volume and Anisotropy losses.
+
+Here is the exact breakdown of why:
+
+---
+
+### Side-by-Side Compute & Memory Comparison
+
+| Method | Autodiff Order (Exact / w/ FD Stencil) | Step Time vs. Current Volume/Aniso Loss | Memory vs. Current Volume/Aniso Loss | Standalone $O(1)$ Test Inference? | Why |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **Current 1D Band Loss** *(Baseline)* | `2nd` (`3rd` for $K$) / `1st` | `1.0x` (~`4 ms` exact, ~`2 ms` FD) | `1.0x` (~`3.5 MB` exact, ~`1.8 MB` FD) | Yes | Evaluates $g(x) \in \mathbb{R}^{N \times 2 \times 2}$ once per step. |
+| **1. Coupled Subspace Orthogonality** ($\Theta \leftrightarrow \mathcal{M}$) | **`3rd` (`4th` for $K$) / `2nd`** | **`~10x–30x` slower** *(`~4x–8x` if sketched)* | **`~10x–25x` higher** *($O(NP)$ active graph)* | Needs class projectors $\Pi_c$ | **Heavy**: puts $\partial_\theta g(x; \theta)$ *inside* the forward loss, forcing `backward()` to take **2nd derivatives in $\theta$** ($\partial_\theta^2 g$) and store $(3N \times P)$ parameter Jacobians with autograd history. |
+| **2. DeWitt Geodesic Simplex on $\mathrm{Sym}^+_2$** | **`2nd` / `1st`** | **`~1.00x` (Zero penalty!)** | **`~1.00x` (Zero penalty!)** | **Yes** ($\arg\min_c d_{\mathrm{AI}}(g(x^*), G^*_c)$) | **Zero overhead**: uses the *exact same* $g(x) \in \mathbb{R}^{N \times 2 \times 2}$ tensor plus closed-form $2 \times 2$ eigenvalues against tiny constant $2 \times 2$ prototypes $(G^*_c)^{-1/2}$. |
+| **3. Geodesic Metric-Barrier Loss** | **`2nd` / `1st`** | **`~1.05x–1.20x`** *(endpoint $k$-NN)*<br>**`~100x`** *(naive all-midpoints)* | **`~1.05x–1.15x`** *(endpoint $k$-NN)* | Needs training anchors ($k$-NN in $d_g$) | Naive midpoint evaluation runs the MLP on $\binom{N}{2}$ pairs (`~100x` cost), **but** trapezoidal endpoint quadrature $\frac{1}{2}\Delta x^T(g(x_i)+g(x_j))\Delta x$ on $k$-NN pairs reuses the $1N$ metrics $g(x_i)$ with `< 0.2 ms` overhead. |
+
+---
+
+### Detailed Takeaways on Where Penalties Arise (and How to Avoid Them)
+
+1. **Why Method 1 (`Coupled Subspace Orthogonality`) Is Expensive**:
+   * Because the loss itself depends on the parameter Jacobian $U(x_i; \theta) \propto \partial_\theta g(x_i; \theta)$, calling `loss.backward()` differentiates with respect to $\theta$ **twice** ($\nabla_\theta U \sim \partial_\theta^2 g(x; \theta)$), analogous to differentiating through a Neural Tangent Kernel or MAML inner step.
+   * Even if we replace spatial autodiff with 1st-order FD stencils from [notebooks/07-evaluating-efficient-training.ipynb](notebooks/07-evaluating-efficient-training.ipynb) and use Woodbury for $(G^\Theta + \lambda I)^{-1}$, PyTorch still has to keep a $(3N \times P)$ parameter-Jacobian graph in memory to backpropagate through $U(x_i; \theta)$.
+
+2. **Why Method 2 (`DeWitt Geodesic Simplex on Sym^+_2`) Gets the Coupling for Free (`1.00x` Time & Memory)**:
+   * Instead of putting $\partial_\theta g$ *inside* the forward loss, Method 2 keeps the forward loss purely on the 3-dimensional Riemannian manifold of $2 \times 2$ data metrics $(\mathrm{Sym}^+_2, d_{\mathrm{AI}})$:
+     $$M_n = (G^*_{y_n})^{-1/2}\, g(x_n; \theta)\, (G^*_{y_n})^{-1/2}, \qquad d_{\mathrm{AI}}(g(x_n), G^*_{y_n})^2 = (\log \lambda_1(M_n))^2 + (\log \lambda_2(M_n))^2$$
+   * For $2 \times 2$ matrices, $\lambda_{1,2}(M_n) = \frac{1}{2}\big(\mathrm{Tr} M_n \pm \sqrt{(\mathrm{Tr} M_n)^2 - 4\det M_n}\big)$ is **five arithmetic operations** on the exact same $g(x_n)$ tensor we already compute—so it works seamlessly with `SGD` + Notebook 07's `3-pt FD` or `1N k-NN` approximations at **~`1.5–2 ms/step` and ~`1.5 MB/step`**!
+   * Yet when paired with Coupled Natural Gradient (or Notebook 07's fast `O(S^2 P)` Woodbury Coupled NGD), the Gauss–Newton pullback of $d_{\mathrm{AI}}^2$ onto parameter space $\Theta$ **is still the exact coupled DeWitt metric $G^{\Theta,\mathrm{DeWitt}}(\theta)$**—giving full parameter–data metric coupling without increasing derivative order!
+   * **Class capacity**: `Sym^+_2` has dimension `3`, so up to **`C = 4` classes** fit as an exact equidistant regular simplex in a single 2D metric (`C = 3` on the equiareal circle $\det G^*_c = 1$ at $0^\circ, 60^\circ, 120^\circ$; `C = 4` as a regular 3D hyperbolic tetrahedron combining volume + anisotropy). For `C >= 5`, using $k = \lceil (C-1)/3 \rceil$ 2D output heads gives $(\mathrm{Sym}^+_2)^k$ with cost growing only in the tiny final linear layer.
+
+3. **Why Method 3 (`Geodesic Metric-Barrier`) Is Cheap Only with Endpoint Quadrature**:
+   * Evaluating $g(\cdot)$ at pair midpoints $\frac{1}{2}(x_i + x_j)$ blows up batch size from $N$ to $O(N^2)$ (or $O(kN)$).
+   * Using **endpoint quadrature** $E_g(\gamma_{ij}) \approx \frac{1}{2}\Delta x_{ij}^T (g(x_i) + g(x_j))\Delta x_{ij}$ on precomputed $k$-NN pairs reuses the single $N$-point metric batch $g(x_1), \dots, g(x_N)$, keeping training cost within **`~5%–20%`** of Method 2.
+
+
+---
+
+## Turn 24
+
+### User
+ok, then implement this with the new notebook that you suggested, but add a section where you compare compute times and memory consumption with the previous methods (SGD + previous geometric losses exact + their approximations)
+
+### Assistant
+Implemented all three $S_C$-symmetric parameter–data coupled multiclass formulations in [src/diffgeom/geometry.py](src/diffgeom/geometry.py), added unit tests in [tests/test_geometry.py](tests/test_geometry.py) (`uv run pytest`: `6/6` passed), and built/executed [notebooks/08-symmetric-coupled-multiclass.ipynb](notebooks/08-symmetric-coupled-multiclass.ipynb) (registered in [scripts/build_all_notebooks.py](scripts/build_all_notebooks.py) and [src/diffgeom/cli.py](src/diffgeom/cli.py)).
+
+### Key Results from [notebooks/08-symmetric-coupled-multiclass.ipynb](notebooks/08-symmetric-coupled-multiclass.ipynb)
+
+1. **Section 1 — Elimination of 1D Ordering & IVT Phantom Boundaries**:
+   - **Exact Geodesic Simplex Equidistance**: Pairwise DeWitt geodesic distances $d_{\mathrm{AI}}(G^*_a, G^*_b)$ have `1.33e-15` spread across both $C = 3$ ($0^\circ, 60^\circ, 120^\circ$ Tissot ellipses) and $C = 4$ (regular 3D Riemannian tetrahedron in $\mathrm{Sym}^+_2 \cong \mathbb{R}_{\mathrm{vol}} \times \mathbb{H}^2$).
+   - **$S_3$ Permutation Spread (all $3! = 6$ relabelings)**: `1D Volume Band` (`1.77e-01`) and `1D Anisotropy Band` (`1.83e-01`) vary under relabeling, whereas `DeWitt Geodesic Simplex` (`4.44e-16`), `Geodesic Metric-Barrier` (`0.00e+00`), and `Coupled Subspace Ortho` (`0.00e+00`) are strictly permutation-invariant.
+   - **IVT Phantom Strip**: Along the direct `Class 0 <-> Class 2` segment on 3-class triple-junction blobs, `1D Volume Band` misclassifies **`16.0%`** of the border as phantom `Class 1`, whereas `DeWitt Geodesic Simplex` reduces phantom intrusion to **`0.0%`**.
+
+2. **Section 2 — Multiclass Accuracy Across 3-Class, 4-Class & `config.yaml` (`circles`, `noise=0.2`, `[2, 10, 2]`)**:
+   - **3-Class Triple-Junction Blobs**: `DeWitt Simplex (SGD+FD)` (`98.33%`), `DeWitt Simplex (Coupled NGD)` (`98.33%`), and `Geodesic Barrier` (`98.33%`) match `SGD + Cross-Entropy` (`98.33%`); `Coupled Subspace Ortho` reaches `97.50%`.
+   - **4-Class Regular Tetrahedron (`d_L = 2` output layer only!)**: `DeWitt Simplex (SGD+FD)` (`95.83%`) and `Coupled Subspace Ortho` (`97.50%`) surpass both `1D Volume Band` (`88.33%`) and 4-logit `SGD + Cross-Entropy` (`95.00%`).
+   - **3-Class Noisy Concentric Circles (`config.yaml`)**: `DeWitt Simplex (SGD+FD)` reaches **`85.00%`** vs. `75.00%` for `1D Volume Band` (matching `85.83%` for `SGD + Cross-Entropy`).
+
+3. **Section 3 — 16-Method Compute & Memory Benchmark (vs. `SGD + CE`, Previous Exact & Previous Approximations)**:
+   - `SGD + Cross-Entropy (1st, 1N)`: `2.04 ms/step`, `0.18 MB`
+   - `Prev Vol Band (App1: 3-pt FD, 1st)`: `2.06 ms/step` (`1.00x`), `0.98 MB`
+   - `New DeWitt Simplex (3-pt FD, 1st)`: **`2.06 ms/step` (`1.00x`)**, `2.44 MB`
+   - `New DeWitt Simplex (1N k-NN, 1st)`: **`1.99 ms/step` (`0.97x`)**, `2.25 MB`
+   - `New Geodesic Barrier (3-pt FD, 1st)`: **`2.18 ms/step` (`1.06x`)**, `2.87 MB`
+   - `New Coupled Subspace Ortho (FD 2nd-θ / Exact 3rd)`: `15.93 ms` / `14.69 ms` (`~7.1x–7.7x`) and `56.7–64.5 MB` (comparable to exact 3rd-order Levi-Civita curvature at `18.40 ms` / `69.64 MB`).
+
+4. **Section 4 — Internal Geometric Visualizations**:
+   - Visualizes the learned $0^\circ / 60^\circ / 120^\circ$ Tissot ellipses (`DeWitt Simplex`), the symmetric Y-junction high-volume barrier wall (`Geodesic Barrier`), and the $3 \times 3$ block-diagonal Grassmannian overlap matrix $\mathcal{K}_{\Theta \leftrightarrow \mathcal{M}}(x_i, x_j)$ (`Coupled Subspace Ortho`).
+
+
+---
+
+## Turn 25
+
+### User
+add a section with two experiments in this last notebook measuring computation time and memory consumption 1) as the number of dimensions, 2) as the number of classes increases
+
+### Assistant
+Added **Section 5** (`## 5. Scaling Compute Time & Memory Consumption: (1) Input Dimension d_0 and (2) Number of Classes C`) with detailed explanatory headers, two empirical scaling tables, and a $2 \times 2$ log–log scaling plot at the end of [notebooks/08-symmetric-coupled-multiclass.ipynb](notebooks/08-symmetric-coupled-multiclass.ipynb) (generated via [scripts/build_all_notebooks.py](scripts/build_all_notebooks.py)), along with two supporting helpers in [src/diffgeom/geometry.py](src/diffgeom/geometry.py):
+- `fibered_dewitt_simplex_loss`: Exact $S_C$-equidistant product-manifold $(\mathrm{Sym}^+_2)^C$ DeWitt simplex loss ($d_L = 2C$, $E(2)^C$-invariant) supporting arbitrary $C \ge 2$ without geometric crowding in $O(NC)$ operations.
+- `return_ambient: bool = True` in `compute_sketched_pullback_metric` (and `plane_sketch: bool = False` in `compute_coupled_subspace_factors` / `coupled_subspace_orthogonality_loss`) so 2-probe tangent-plane sketches avoid allocating $O(N d_0^2)$ ambient metric tensors when $d_0 \gg 2$.
+
+---
+
+### Summary of Measured Scaling Results (Section 5 of `08-symmetric-coupled-multiclass.ipynb`)
+
+#### 1. Experiment 5.1 — Scaling vs. Ambient Input Dimension (`d_0 = 2, 4, 8, 16, 32, 64, 128`, `C = 3`, `N = 96`)
+
+| `d_0` | `SGD + Cross-Entropy` (`ms` / `MB`) | `Prev Volume Band` (`Exact jacrev`) | `DeWitt Simplex` (`Coord FD, (d_0+1)N`) | `DeWitt Simplex` (`2-Probe Sketch, 3N`) | `Geodesic Barrier` (`Coord FD, (d_0+1)N`) | `Coupled Subspace` (`2-Probe, 2nd-θ`) |
+| ---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `2` | `7.53 / 0.19` | `9.51 / 1.18` | `1.86 / 1.32` | **`1.80 / 1.32`** | `1.61 / 1.25` | `45.96 / 526.6` |
+| `8` | `10.96 / 0.19` | `10.08 / 1.75` | `2.32 / 3.04` | **`2.07 / 1.34`** | `2.72 / 9.20` | `50.80 / 675.9` |
+| `32` | `7.90 / 0.20` | `10.12 / 9.32` | `3.35 / 15.14` | **`2.47 / 1.44`** | `8.47 / 118.06` | `124.85 / 1305.4` |
+| `64` | `7.47 / 0.21` | `10.31 / 32.59` | `4.91 / 44.49` | **`2.00 / 1.56`** | `23.51 / 454.94` | `278.93 / 2225.3` |
+| `128` | `8.78 / 0.24` | `12.00 / 124.32` | `8.04 / 148.52` | **`3.04 / 1.83`** | `210.59 / 1786.06` | `1022.07 / 4341.0` |
+
+* **Takeaway**: Coordinate-wise pullback metrics (`Exact jacrev`, `Coord FD`) grow as $O(d_0)$–$O(d_0^2)$ in memory (`124–149 MB` at `d_0 = 128`, and `1786 MB` when contracted across $k$-NN pairs in `Geodesic Barrier`), while `Coupled Subspace` grows steepest (`1022 ms / 4341 MB` at `d_0 = 128`) because parameter count $P(d_0)$ grows with $d_0$ inside its 2nd-order-in-$\theta$ graph. By contrast, **`DeWitt Simplex (2-Probe Sketch, 3N)` stays nearly $O(1)$ in both latency (`1.80 -> 3.04 ms`) and memory (`1.32 -> 1.83 MB`)** across the entire $64\times$ jump from `d_0 = 2` to `d_0 = 128`.
+
+---
+
+#### 2. Experiment 5.2 — Scaling vs. Number of Classes (`C = 2, 3, 4, 8, 16, 32, 64`, `d_0 = 2`, `N = 192`)
+
+| `C` | `SGD + CE` (`d_L = C`) | `Prev 1D Vol Band` (`d_L = 2`) | `DeWitt Single Sym^+_2` (`d_L = 2`) | `DeWitt Fibered (Sym^+_2)^C` (`d_L = 2C`) | `Geodesic Barrier` (`d_L = 2`) | `Coupled Subspace` (`d_L = 2`) |
+| ---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `2` | `4.13 / 0.13` | `1.63 / 0.71` | `2.18 / 1.49` | `2.59 / 2.76` | **`2.24 / 1.65`** | `12.41 / 53.8` |
+| `4` | `3.97 / 0.16` | `1.53 / 0.79` | `1.79 / 2.41` | `2.45 / 5.18` | **`2.54 / 1.65`** | `12.60 / 54.4` |
+| `16` | `3.91 / 0.34` | `1.55 / 0.79` | `4.29 / 7.90` | `3.96 / 19.71` | **`2.05 / 1.65`** | `12.31 / 57.9` |
+| `32` | `3.87 / 0.58` | `1.68 / 0.79` | `2.91 / 15.26` | `5.32 / 39.08` | **`1.84 / 1.65`** | `12.74 / 62.5` |
+| `64` | `4.00 / 1.05` | `1.58 / 0.79` | `3.61 / 29.91` | **`6.30 / 77.82`** | **`1.95 / 1.65`** | `19.62 / 71.7` |
+
+* **Takeaway**:
+  - **`Geodesic Barrier` (`d_L = 2`)** is strictly **$O(1)$ in both latency (`~1.9–2.5 ms`) and memory (`1.65 MB` constant)** from `C = 2` to `C = 64` while remaining 100% $S_C$-symmetric with zero crowding.
+  - **`DeWitt Single Sym^+_2` (`d_L = 2`)** keeps the network $O(1)$ in $C$ (`2.18 -> 3.61 ms`, `1.49 -> 29.91 MB` from $(N, C)$ margin distances), though $\dim(\mathrm{Sym}^+_2) = 3$ only hosts up to $C = 4$ *mutually equidistant* vertices before prototypes crowd on $\mathbb{H}^2$.
+  - **`DeWitt Fibered (Sym^+_2)^C` (`d_L = 2C`)** resolves crowding for arbitrary $C > 4$ with exact $S_C$ equidistance and standalone prototype inference, scaling gently and linearly $O(C)$ in its final output layer (`2.59 -> 6.30 ms/step`, `2.76 -> 77.82 MB/step` at `C = 64`).
+
+
+---
+
+## Turn 26
+
+### User
+ok. i need the new methods still to scale much better when the number of dimensions and classes grows, specially in memory usage, please investigate alternatives
+
+### Assistant
+### 1. Root-Cause Memory Diagnosis (Why Each Method Grew in Section 5)
+
+Profiling the autograd allocations in [notebooks/08-symmetric-coupled-multiclass.ipynb](notebooks/08-symmetric-coupled-multiclass.ipynb) pinpoints four exact tensor bottlenecks:
+
+1. **Materializing & Pair-Indexing $(d_0 \times d_0)$ Metrics (`Geodesic Barrier`: `1,786 MB` at `d_0 = 128`)**:
+   - Evaluating full coordinate FD runs $(d_0 + 1)N$ forward passes (`12,384` samples at $d_0 = 128$), and `0.5 * (g[src] + g[dst])` copies a $(d_0 \times d_0)$ matrix across $P_{\mathrm{pairs}} \approx 14N$ edges in the autograd graph ($O(P_{\mathrm{pairs}} d_0^2)$ memory).
+2. **One-Hot Fiber Coding & `(N, C, 2, 2)` 3-Way `einsum` (`DeWitt Simplex`: `77.8 MB` for `(Sym^+_2)^C` and `29.9 MB` for `Sym^+_2` at `C = 64`)**:
+   - Assigning a dedicated 2D output fiber to every class (`d_L = 2C`) scales final-layer activations and fiber metrics linearly as $O(NC)$.
+   - Even for a single fiber (`d_L = 2`), `einsum("cij,njk,ckl->ncil", ...)` materializes `(N, C, 2, 2)` intermediate buffers to compute eigenvalues against all $C$ prototypes.
+3. **$P$-Tangent `jacfwd` Inside a 2nd-Order Autograd Graph (`Coupled Subspace`: `4,341 MB` at `d_0 = 128`, `71.7 MB` at `C = 64`)**:
+   - Calling `backward()` through `jacfwd(sym3_features)(params)` holds $P(d_0)$ simultaneous forward-over-reverse autograd tapes in RAM ($P = 2,402$ at $d_0 = 128$), builds a dense $P \times P$ DeWitt matrix, and forms an $O(N^2)$ (or $O(C^2)$) pairwise overlap tensor.
+4. **High-$d_0$ Random-Plane Orientation Pitfall**:
+   - Redrawing a *random* 2-plane $Q \in V_2(\mathbb{R}^{d_0})$ every step washes out anisotropic prototype orientations ($0^\circ$ vs. $60^\circ$ vs. $120^\circ$ have no consistent meaning on a rotating plane, dropping 8-class $\mathbb{R}^8$ accuracy to `65%`). Fixing $Q_0 \in V_2(\mathbb{R}^{d_0})$ once at $t = 0$ as the **canonical top-2 data PCA Stiefel 2-frame** preserves full $E(2)$ output invariance while keeping `3N` forward passes ($O(1)$ in $d_0$) and restoring **`99%–100%`** accuracy.
+
+---
+
+### 2. Three Memory-Optimal Alternatives (`30x` to `1,387x` Less Memory)
+
+#### Alternative A — **Canonical-Frame Logarithmic-Fiber Hyperboloid DeWitt (`O(1)` in $d_0$, `O(log C)` in $C$)**
+Instead of $K = C$ fibers (`d_L = 2C`) and $2 \times 2$ matrix contractions, combine three exact geometric identities:
+1. **Logarithmic Spherical Metric Codebook ($K = \lceil \log_2 C \rceil$ fibers, $d_L = 2\lceil \log_2 C \rceil$)**:
+   - $(\mathrm{Sym}^+_2)^K$ has Riemannian dimension $3K$. Placing $C$ prototypes via repulsive Riesz/Tammes dispersion on $\mathbb{S}^{3K-1}$ mapped by $\mathrm{Exp}_{(e^{s_0}I_2)^K}$ eliminates crowding using only **`K = 6` fibers (`d_L = 12`) for `C = 64`** and **`K = 8` (`d_L = 16`) for `C = 256`**—smaller than Cross-Entropy's `C`-wide logit layer!
+2. **Exact Minkowski Hyperboloid Isometry ($\mathrm{Sym}^+_2 \cong \mathbb{R}_{\mathrm{vol}} \times \mathbb{H}^2$)**:
+   - Map each fiber metric $g_k \in \mathrm{Sym}^+_2$ once ($O(NK)$) to $s_k = \frac{1}{2}\log\det g_k$ and unimodular hyperboloid vector $u_k = \big(\frac{\tilde{g}_{00}+\tilde{g}_{11}}{2}, \frac{\tilde{g}_{00}-\tilde{g}_{11}}{2}, \tilde{g}_{01}\big)$ ($\tilde{g} = (\det g)^{-1/2} g$). Exact squared DeWitt distance reduces to scalar dot products (verified to `1.1e-10` against `compute_dewitt_dist_sq` without `(N, C, 2, 2)` tensors):
+     $$d_{\mathrm{AI}}^2(g_k, G^*_{c,k}) = 2(s_k - s^*_{c,k})^2 + 2\,\mathrm{arccosh}^2\!\big(u_{k,0} u^*_{c,k,0} - u_{k,1} u^*_{c,k,1} - u_{k,2} u^*_{c,k,2}\big).$$
+3. **Sampled $m_{\mathrm{neg}}$-Negative Voronoi Margin ($m_{\mathrm{neg}} = 8 \ll C$)**:
+   - Evaluates exact distance to the ground-truth prototype $\mathbf{G}^*_{y_n}$ plus $m_{\mathrm{neg}}$ sampled negative prototypes per step, eliminating the $O(NC)$ logit matrix during training (`O(N log C)` total memory).
+
+#### Alternative B — **2-Segment Midpoint Polygonal Geodesic Barrier (`O(1)` in *Both* $d_0$ and $C$)**
+Instead of forming $g(x) \in \mathbb{R}^{d_0 \times d_0}$, discretize Riemannian path energy and arc length **directly in output space** along 1 sampled same-class edge $(i, j^+)$ and 1 cross-class boundary edge $(i, j^-)$ per sample via their midpoints $x_{\mathrm{mid}}^\pm = \frac{1}{2}(x_i + x_{j^\pm})$ (`3N` forward passes total, `d_L = 2` or `4`):
+$$E_{\mathrm{same}}(i) = 2\big\|f(x_{\mathrm{mid},i}^+) - f(x_i)\big\|_2^2 + 2\big\|f(x_{j^+(i)}) - f(x_{\mathrm{mid},i}^+)\big\|_2^2, \qquad \ell_{\mathrm{diff}}(i) = \big\|f(x_{\mathrm{mid},i}^-) - f(x_i)\big\|_2 + \big\|f(x_{j^-(i)}) - f(x_{\mathrm{mid},i}^-)\big\|_2.$$
+- Evaluates the exact midpoint quadrature of $\int_0^1 \|J_f(\gamma(t))\Delta x\|\,dt$ along the true chord $\Delta x \in \mathbb{R}^{d_0}$ with **zero $(d_0 \times d_0)$ matrices**, **zero step-size $h$**, and **strictly constant memory in $C$**.
+
+#### Alternative C — **1st-Order Coupled Subspace Orthogonality + Gram Trace Identity (`~1,000x` Less Memory)**
+Eliminates all three memory bottlenecks of `Coupled Subspace Orthogonality`:
+1. **Eliminate 2nd-Order Autograd (`jacfwd` -> Analytic Head Jacobian *or* $r$-Probe $\Theta$-FD)**:
+   - **Variant C1 (`ParamFD-Subsp`, full-network coupling)**: Project parameter tangents onto $r = 6$ random orthonormal directions $V \in \mathbb{R}^{P \times r}$ via 1st-order forward differences in $\theta$ and whiten with an **`r x r` (`6 x 6`)** sketched DeWitt matrix instead of $P \times P$.
+   - **Variant C2 (`Analytic Head-Subsp`, `3N` forward passes total)**: Compute the **exact closed-form** derivative $U_{\mathrm{head}}(x) = \partial_{W_L}(g_0^{-1/2} g_{Q_0}(x) g_0^{-1/2}) \in \mathbb{R}^{3 \times 2d_{\mathrm{hid}}}$ analytically from the penultimate Jacobian $H(x) = D_{Q_0} h_{L-1}(x)$, keeping parameter subspace width $P_{\mathrm{head}} = 2 d_{\mathrm{hid}}$ (`32`–`64`) **100% independent of $d_0$** while `backward()` updates all trunk layers via pure 1st-order autograd!
+2. **Eliminate $O(N^2)$ and $O(C^2)$ Pairwise Overlap Matrices via the Gram Identity**:
+   - Aggregate normalized class-mean subspaces $\bar{W}_c \in \mathbb{R}^{3 \times r}$ ($B_c \le \min(N, C)$ active classes in batch) and use the exact trace identity:
+     $$\sum_{a \neq b} \big\|\bar{W}_a \bar{W}_b^T\big\|_F^2 = \left\|\sum_{c=1}^{B_c} \bar{W}_c^T \bar{W}_c\right\|_F^2 - \sum_{c=1}^{B_c} \big\|\bar{W}_c \bar{W}_c^T\big\|_F^2$$
+     which forms a tiny **`r x r` Gram matrix** (`O(B_c r^2)`) instead of an $O(N^2)$ or $O(C^2)$ pairwise tensor!
+
+---
+
+### 3. Prototype Benchmark & Accuracy Verification
+
+| Regime | Baseline in Notebook `08` (`ms` / `MB`) | Scalable Alternative (`ms` / `MB`) | Memory Reduction |
+| :--- | :---: | :---: | :---: |
+| **`d_0 = 128`, `C = 3`** (`DeWitt`) | `8.04 ms` / `148.52 MB` *(Coord FD)* | **`3.18 ms` / `1.37 MB`** *(LogFib-DeWitt, `3.39 MB` at `d_0 = 512`)* | **`108x` less** *(1.0x vs 2-probe)* |
+| **`d_0 = 128`, `C = 3`** (`Barrier`) | `210.59 ms` / `1,786.06 MB` *(Coord FD)* | **`2.18 ms` / `1.42 MB`** *(Midpt-Barrier, `4.56 MB` at `d_0 = 512`)* | **`1,258x` less (`96x` faster)** |
+| **`d_0 = 128`, `C = 3`** (`Coupled Subsp.`) | `1,022.07 ms` / `4,341.0 MB` *(`jacfwd`)* | **`4.72 ms` / `3.13 MB`** *(Analytic Head)*<br>**`12.64 ms` / `4.41 MB`** *(6-Probe $\Theta$-FD)* | **`1,387x` less (`216x` faster)**<br>**`984x` less (`81x` faster)** |
+| **`d_0 = 2`, `C = 64`** (`DeWitt`) | `6.30 ms` / `77.82 MB` *(`(Sym^+_2)^C`, `d_L=128`)* | **`4.17 ms` / `5.05 MB`** *(LogFib `K=6`, `d_L=12`, `m_neg=8`)* | **`15.4x` less** *(zero crowding)* |
+| **`d_0 = 2`, `C = 64`** (`Coupled Subsp.`) | `19.62 ms` / `71.70 MB` *(`jacfwd`)* | **`11.72 ms` / `8.48 MB`** *(ParamFD + Gram)*<br>**`5.59 ms` / `10.92 MB`** *(Head + Gram)* | **`8.5x` less** |
+| **Joint `d_0 = 128`, `C = 256`** (`N = 256`) | *OOM / multi-GB for all 3 baselines* | **LogFib (`K=8, d_L=16`)**: `5.00 ms` / **`10.40 MB`**<br>**Midpt-Barrier (`d_L=2`)**: `2.44 ms` / **`4.13 MB`**<br>**ParamFD-Subsp**: `14.03 ms` / **`14.09 MB`**<br>**Head-Subsp**: `9.63 ms` / **`20.71 MB`** | **All `< 21 MB` at `d_0=128, C=256`** |
+
+* **Multiclass Test Accuracy in $\mathbb{R}^{16}$ (`d_0 = 16`, `blobs`, `N_train = 320`)**:
+  - **`C = 8` classes**: `SGD+CE`: `100.00%` | `LogFib-DeWitt (K=3, d_L=6)`: **`99.38%`** | `Midpt-Barrier`: **`100.00%`** | `Analytic Head-Subsp`: **`99.38%`**
+  - **`C = 16` classes**: `SGD+CE`: `100.00%` | `LogFib-DeWitt (K=4, d_L=8)`: **`98.75%`** | `Midpt-Barrier`: **`100.00%`** | `Analytic Head-Subsp`: **`100.00%`**
+
+
+---
+
+## Turn 27
+
+### User
+yes, implement them in a new notebook
+
+### Assistant
+Implemented all four memory-scalable $S_C$-symmetric coupled geometric formulations in [src/diffgeom/geometry.py](src/diffgeom/geometry.py) (exported in [src/diffgeom/__init__.py](src/diffgeom/src/diffgeom/__init__.py) and tested in [tests/test_geometry.py](tests/test_geometry.py): `7/7` pytest suites passing, `0` ruff lint warnings), registered Notebook `09` in [src/diffgeom/cli.py](src/diffgeom/cli.py) and [scripts/build_all_notebooks.py](scripts/build_all_notebooks.py), and built/executed [notebooks/09-scalable-coupled-multiclass.ipynb](notebooks/09-scalable-coupled-multiclass.ipynb).
+
+### Key Verified Results from [notebooks/09-scalable-coupled-multiclass.ipynb](notebooks/09-scalable-coupled-multiclass.ipynb)
+
+1. **Section 1 — Exact Algebraic Identities, Logarithmic Prototype Separation & Canonical 2-Frames**:
+   - **Minkowski-Hyperboloid Isometry vs. $2 \times 2$ Eigenvalue DeWitt Distance**: `7.19e-11` max difference.
+   - **$r \times r$ Gram Trace Identity vs. Explicit $O(C^2)$ Off-Diagonal Subspace Sum**: `2.78e-17` max difference.
+   - **Zero Crowding at $C = 256$**: Minimum pairwise DeWitt prototype separation $\min_{a \neq b} d_{\mathrm{AI}}$ collapses to `0.0616` on a single $\mathrm{Sym}^+_2$, whereas `Log-Fibered (K = 8, d_L = 16)` maintains **`1.7873`** (`16` output neurons vs. `256` Cross-Entropy logits and `512` one-hot fibers).
+   - **Canonical PCA 2-Frame ($Q_0$) vs. Rotating Random 2-Plane ($Q_t$) on `8-Class R^16`**: **`100.00%`** test accuracy vs. **`34.38%`**.
+
+2. **Section 2 — Multiclass Accuracy & `0.0%` IVT Phantom Intrusion**:
+   - **`3-Class Triple-Junction (R^2)`**: `Midpoint Polygonal Barrier`: **`100.00%`** (`0.0%` phantom), `LogFib Hyperboloid DeWitt`: **`98.33%`** (`0.0%` phantom), matching `SGD + Cross-Entropy` (`98.33%`).
+   - **Active `config.yaml` (`circles`, `noise=0.2`, `[2, 10, 2]`)**: `LogFib Hyperboloid DeWitt` (**`84.17%`**) and `Midpoint Polygonal Barrier` (**`83.33%`**) match/exceed `SGD + Cross-Entropy` (`83.33%`).
+   - **`8-Class Blobs (R^16)`**: `SGD+CE`: `100.00%` | `LogFib-DeWitt`: **`100.00%`** | `Midpt-Barrier`: **`100.00%`** | `ParamFD-Subsp`: **`99.38%`** | `Analytic Head-Subsp`: **`98.75%`**.
+   - **`16-Class Blobs (R^16)`**: `SGD+CE`: `100.00%` | `Midpt-Barrier`: **`100.00%`** | `LogFib-DeWitt`: **`99.48%`** | `Analytic Head-Subsp`: **`99.48%`** | `ParamFD-Subsp`: **`97.92%`**.
+
+3. **Section 3 — High-Dimensional Scaling (`d_0 = 2 -> 512`, `C = 3`, `N = 96`)**:
+   - At `d_0 = 128`: `Nb08 Barrier CoordFD` (`113.75 ms / 1,125.41 MB`) and `Nb08 Coupled Subspace` (`998.17 ms / 1,767.38 MB` at `N=64`) drop to:
+     - **`Nb09 LogFib-DeWitt`**: `2.86 ms / 1.38 MB` (**`3.68 ms / 3.40 MB`** at `d_0 = 512`)
+     - **`Nb09 Midpt-Barrier`**: `2.16 ms / 1.42 MB` (**`2.55 ms / 4.57 MB`** at `d_0 = 512`)
+     - **`Nb09 Analytic Head-Subspace`**: `4.21 ms / 3.12 MB` (**`4.50 ms / 5.14 MB`** at `d_0 = 512`)
+     - **`Nb09 ParamFD-Subspace (r=6)`**: `12.28 ms / 4.40 MB` (**`24.58 ms / 8.34 MB`** at `d_0 = 512`)
+
+4. **Section 4 — Many-Class Scaling (`C = 2 -> 256`, `d_0 = 2`, `N = 256`)**:
+   - **`Nb09 Midpt-Barrier (d_L = 2)`**: **`1.85 ms / 1.42 MB`** at `C = 256` (strictly constant `1.42 MB` from `C = 2` to `C = 256`—smaller than `SGD + Cross-Entropy`'s `2.29 MB` at `C = 256`!).
+   - **`Nb09 LogFib-DeWitt (d_L = 16, m_neg = 8)`**: **`5.47 ms / 9.04 MB`** at `C = 256` (vs. `78.38 MB` already at `C = 128` for `Nb08 OneHot`).
+   - **`Nb09 ParamFD` & `Head-Subspace + Gram`**: **`11.70 MB`** and **`18.95 MB`** at `C = 256` (vs. `2,373.86 MB` for `Nb08 Subspace` at `C = 128`).
+
+5. **Section 5 — Simultaneous High-Dimension + Many-Class Diagonal Stress Test (`d_0 = C = 4 -> 256`, `N = 256`)**:
+   - At **`(d_0 = 256, C = 256)`**: `Midpt-Barrier`: **`2.56 ms / 7.32 MB`** | `LogFib-DeWitt (d_L = 16)`: **`5.21 ms / 13.34 MB`** | `ParamFD-Subsp`: **`18.84 ms / 20.78 MB`** | `Analytic Head-Subsp`: **`8.81 ms / 22.86 MB`**.

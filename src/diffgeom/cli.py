@@ -12,14 +12,14 @@ def build_notebooks_main() -> None:
     """Build and execute all (or selected) differential geometry notebooks."""
     parser = argparse.ArgumentParser(
         prog="diffgeom-build-notebooks",
-        description="Build and execute the 7 differential-geometry notebooks.",
+        description="Build and execute the 9 differential-geometry notebooks.",
     )
     parser.add_argument(
         "notebooks",
         nargs="*",
         type=int,
-        choices=[1, 2, 3, 4, 5, 6, 7],
-        help="Optional subset of notebook numbers (1..7) to rebuild; defaults to all 7.",
+        choices=[1, 2, 3, 4, 5, 6, 7, 8, 9],
+        help="Optional subset of notebook numbers (1..9) to rebuild; defaults to all 9.",
     )
     args = parser.parse_args()
 
@@ -32,6 +32,6 @@ def build_notebooks_main() -> None:
         sys.path.insert(0, str(repo_root))
 
     mod = runpy.run_path(str(script_path), run_name="diffgeom._notebook_builder")
-    targets = args.notebooks or [1, 2, 3, 4, 5, 6, 7]
+    targets = args.notebooks or [1, 2, 3, 4, 5, 6, 7, 8, 9]
     for idx in targets:
-        mod[f"build_notebook_0{idx}"]()
+        mod[f"build_notebook_{idx:02d}"]()

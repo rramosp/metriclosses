@@ -1173,10 +1173,12 @@ def compute_sketched_pullback_metric(
     eps: float = 1e-6,
     generator: torch.Generator | None = None,
     params: dict[str, torch.Tensor] | None = None,
+    return_ambient: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Estimate pullback metric via m random orthonormal directional probes ((m + 1)*N forward evaluations).
 
     Returns (g_ambient_est, g_subspace), keeping compute O(m) independent of ambient input dimension d_0.
+    Set return_ambient=False when only g_subspace is needed to avoid O(N * d_0^2) ambient tensor memory.
     """
     N, d0 = X.shape
     raw = torch.randn(d0, n_probes, generator=generator, dtype=X.dtype, device=X.device)
@@ -1187,6 +1189,8 @@ def compute_sketched_pullback_metric(
     dz = (Z_all[N:].reshape(N, n_probes, -1) - z0[:, None, :]) / h  # (N, n_probes, d_out)
 
     g_sub = torch.einsum("npa,nqa->npq", dz, dz)  # (N, n_probes, n_probes)
+    if not return_ambient:
+        return g_sub, g_sub
     g_est = (float(d0) / float(n_probes)) * torch.einsum("ip,npq,jq->nij", Q, g_sub, Q)
     eye = torch.eye(d0, dtype=X.dtype, device=X.device).unsqueeze(0)
     g_out = (eye + g_est) if metric_mode == "graph" else (g_est + eps * eye)
@@ -1276,3 +1280,988 @@ def woodbury_coupled_ngd_direction(
     quad = damping * (nat_dir @ nat_dir) + (U_nd @ U_nd) / float(S)
     riem_norm = torch.sqrt(torch.clamp(quad, min=1e-12)).item()
     return nat_dir, riem_norm
+
+
+# =============================================================================
+# S_C-Symmetric Parameter-Data Coupled Multiclass Geometric Losses (Order-Free)
+# =============================================================================
+
+
+def compute_dewitt_dist_sq(
+    g: torch.Tensor,
+    proto_inv_sqrt: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Closed-form squared affine-invariant (DeWitt) geodesic distance on Sym^+_2.
+
+    Given sample metrics g of shape (N, 2, 2) and prototype inverse square roots
+    (G^*_c)^{-1/2} of shape (C, 2, 2), returns D2 of shape (N, C) with entries:
+        D2[n, c] = || log( (G^*_c)^{-1/2} g[n] (G^*_c)^{-1/2} ) ||_F^2.
+    """
+    M = torch.einsum("cij,njk,ckl->ncil", proto_inv_sqrt, g, proto_inv_sqrt)
+    tr = M[..., 0, 0] + M[..., 1, 1]
+    det = torch.clamp(M[..., 0, 0] * M[..., 1, 1] - M[..., 0, 1] * M[..., 1, 0], min=eps * eps)
+    half_tr = 0.5 * torch.clamp(tr, min=2.0 * eps)
+    disc = torch.sqrt(torch.clamp(half_tr * half_tr - det, min=0.0) + 1e-12)
+    lam1 = torch.clamp(half_tr + disc, min=eps)
+    lam2 = torch.clamp(det / lam1, min=eps)
+    return torch.log(lam1) ** 2 + torch.log(lam2) ** 2
+
+
+def build_dewitt_simplex_prototypes(
+    n_classes: int = 3,
+    tau: float = 0.75,
+    graph_margin: float = 0.35,
+    dtype: torch.dtype = torch.float64,
+    device: str | torch.device = "cpu",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Construct C S_C-symmetric prototype metrics G^*_c in {G > I_2} subset Sym^+_2.
+
+    For C in {2, 3, 4}, all C*(C-1)/2 pairwise affine-invariant DeWitt geodesic distances
+    d_AI(G^*_a, G^*_b) are strictly equal to float64 machine precision:
+      - C = 2: Orthogonal Tissot ellipses (0 deg, 90 deg).
+      - C = 3: Equilateral hyperbolic triangle on the Poincare anisotropy disk (0, 60, 120 deg).
+      - C = 4: Regular 3D Riemannian tetrahedron in Sym^+_2 = R_vol x H^2.
+    Setting graph_margin > 0 ensures min_eig(G^*_c) = exp(graph_margin) > 1 so every prototype
+    is exactly realizable by the graph pullback metric g(x) = I_2 + J(x)^T J(x).
+    Returns (prototypes, proto_inv_sqrt), each of shape (C, 2, 2).
+    """
+    if n_classes < 2:
+        raise ValueError(f"n_classes must be >= 2, got {n_classes}")
+
+    def rot_aniso(theta: float, r: float, log_scale: float) -> torch.Tensor:
+        c_val, s_val = math.cos(theta), math.sin(theta)
+        R = torch.tensor([[c_val, -s_val], [s_val, c_val]], dtype=dtype, device=device)
+        D = torch.diag(
+            torch.tensor([math.exp(log_scale + r), math.exp(log_scale - r)], dtype=dtype, device=device)
+        )
+        return R @ D @ R.T
+
+    base_s = tau + graph_margin
+    if n_classes == 2:
+        protos = torch.stack([rot_aniso(0.0, tau, base_s), rot_aniso(0.5 * math.pi, tau, base_s)], dim=0)
+    elif n_classes == 3:
+        protos = torch.stack([rot_aniso(math.pi * c / 3.0, tau, base_s) for c in range(3)], dim=0)
+    elif n_classes == 4:
+        g0 = rot_aniso(0.0, tau, 0.0)
+        g1 = rot_aniso(math.pi / 3.0, tau, 0.0)
+        g0_isq = _sym2_inv_sqrt(g0.unsqueeze(0), eps=1e-14)
+        evals_01 = torch.linalg.eigvalsh(g0_isq[0] @ g1 @ g0_isq[0])
+        d_tri_sq = (torch.log(evals_01) ** 2).sum().item()
+        ds = math.sqrt(max((d_tri_sq - 2.0 * tau * tau) / 2.0, 1e-14))
+        protos = torch.stack(
+            [
+                rot_aniso(0.0, tau, base_s),
+                rot_aniso(math.pi / 3.0, tau, base_s),
+                rot_aniso(2.0 * math.pi / 3.0, tau, base_s),
+                rot_aniso(0.0, 0.0, base_s + ds),
+            ],
+            dim=0,
+        )
+    else:
+        protos = torch.stack(
+            [
+                rot_aniso(math.pi * c / n_classes, tau, base_s + (0.0 if c % 2 == 0 else tau))
+                for c in range(n_classes)
+            ],
+            dim=0,
+        )
+    return protos, _sym2_inv_sqrt(protos, eps=1e-14)
+
+
+def dewitt_simplex_predict(
+    g: torch.Tensor,
+    proto_inv_sqrt: torch.Tensor,
+) -> torch.Tensor:
+    """Classify points from their pullback metric g(x) by nearest DeWitt geodesic prototype."""
+    return compute_dewitt_dist_sq(g, proto_inv_sqrt).argmin(dim=-1)
+
+
+def dewitt_simplex_loss(
+    g: torch.Tensor,
+    y: torch.Tensor,
+    proto_inv_sqrt: torch.Tensor,
+    temperature: float = 2.5,
+    anchor_weight: float = 0.12,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """S_C-equivariant Riemannian Voronoi + Frechet anchor loss on (Sym^+_2, d_AI).
+
+    Eliminates 1D class ordering and Intermediate-Value Theorem phantom boundaries at
+    identical O(N) compute and memory cost to scalar Volume/Anisotropy losses.
+    """
+    d2 = compute_dewitt_dist_sq(g, proto_inv_sqrt)
+    loss_voronoi = F.cross_entropy(-0.5 * temperature * d2, y)
+    loss_anchor = d2.gather(1, y.unsqueeze(1)).mean()
+    total = loss_voronoi + anchor_weight * loss_anchor
+    with torch.no_grad():
+        preds = d2.argmin(dim=-1)
+        acc = (preds == y).to(g.dtype).mean().item()
+    return total, {
+        "loss_total": total.item(),
+        "loss_voronoi": loss_voronoi.item(),
+        "mean_dewitt_d2": loss_anchor.item(),
+        "geom_acc": acc,
+    }
+
+
+def build_metric_barrier_pairs(
+    X: torch.Tensor,
+    y: torch.Tensor,
+    k_same: int = 8,
+    k_diff: int = 10,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Precompute k-NN same-class and cross-class index pairs once at t = 0 for geodesic barrier training."""
+    dist = torch.cdist(X, X)
+    N = X.shape[0]
+    same_mask = y[:, None] == y[None, :]
+    same_mask.fill_diagonal_(False)
+    diff_mask = ~(y[:, None] == y[None, :])
+
+    inf = torch.tensor(1e9, dtype=X.dtype, device=X.device)
+    d_same = torch.where(same_mask, dist, inf)
+    d_diff = torch.where(diff_mask, dist, inf)
+
+    ks = min(k_same, int(same_mask.sum(dim=-1).min().item()))
+    kd = min(k_diff, int(diff_mask.sum(dim=-1).min().item()))
+    idx_same = torch.topk(d_same, k=ks, largest=False, dim=-1).indices
+    idx_diff = torch.topk(d_diff, k=kd, largest=False, dim=-1).indices
+    src_same = torch.arange(N, device=X.device).unsqueeze(1).expand_as(idx_same).reshape(-1)
+    src_diff = torch.arange(N, device=X.device).unsqueeze(1).expand_as(idx_diff).reshape(-1)
+    return src_same, idx_same.reshape(-1), src_diff, idx_diff.reshape(-1)
+
+
+def geodesic_barrier_loss(
+    g: torch.Tensor,
+    X: torch.Tensor,
+    src_same: torch.Tensor,
+    dst_same: torch.Tensor,
+    src_diff: torch.Tensor,
+    dst_diff: torch.Tensor,
+    margin: float = 1.5,
+    beta_hinge: float = 4.0,
+    lambda_vol: float = 0.005,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """S_C-invariant relational geodesic barrier loss via trapezoidal endpoint quadrature.
+
+    Contracts Riemannian path energy inside every class symmetrically while erecting high-metric
+    walls between distinct classes, reusing the single 1N metric evaluation g(X).
+    """
+    dx_s = X[dst_same] - X[src_same]
+    g_bar_s = 0.5 * (g[src_same] + g[dst_same])
+    e_same = torch.einsum("pi,pij,pj->p", dx_s, g_bar_s, dx_s)
+
+    dx_d = X[dst_diff] - X[src_diff]
+    g_bar_d = 0.5 * (g[src_diff] + g[dst_diff])
+    d_diff = torch.sqrt(torch.clamp(torch.einsum("pi,pij,pj->p", dx_d, g_bar_d, dx_d), min=1e-10))
+
+    loss_pull = e_same.mean()
+    loss_push = F.softplus(margin - d_diff, beta=beta_hinge).mean()
+    det_g = torch.clamp(torch.linalg.det(g), min=1e-8)
+    loss_reg = (torch.log(det_g) ** 2).mean()
+    total = loss_pull + loss_push + lambda_vol * loss_reg
+    return total, {
+        "loss_total": total.item(),
+        "mean_d_same": torch.sqrt(torch.clamp(e_same, min=1e-10)).mean().item(),
+        "mean_d_diff": d_diff.mean().item(),
+    }
+
+
+def geodesic_knn_predict(
+    model: MoonsMLP,
+    X_eval: torch.Tensor,
+    X_ref: torch.Tensor,
+    y_ref: torch.Tensor,
+    n_classes: int,
+    k_eval: int = 9,
+    n_quad: int = 4,
+    metric_mode: MetricMode = "euclidean",
+) -> torch.Tensor:
+    """Classify points X_eval by inverse-geodesic-distance k-NN voting to training anchors X_ref."""
+    with torch.no_grad():
+        eucl_d = torch.cdist(X_eval, X_ref)
+        cand_idx = torch.topk(eucl_d, k=min(24, X_ref.shape[0]), largest=False, dim=-1).indices
+        M, Kc = cand_idx.shape
+        t_vals = torch.linspace(0.0, 1.0, n_quad, dtype=X_eval.dtype, device=X_eval.device)
+        dx = X_ref[cand_idx] - X_eval[:, None, :]
+        pts = X_eval[:, None, None, :] + t_vals[None, None, :, None] * dx[:, :, None, :]
+        g_pts = compute_layer_pullback_metric(
+            model,
+            pts.reshape(-1, X_eval.shape[1]),
+            layer_idx=model.num_layers,
+            metric_mode=metric_mode,
+            eps=1e-6,
+        ).reshape(M, Kc, n_quad, X_eval.shape[1], X_eval.shape[1])
+        seg_len = torch.sqrt(
+            torch.clamp(torch.einsum("mki,mkqij,mkj->mkq", dx, g_pts, dx), min=1e-10)
+        ).mean(dim=-1)
+        best_local = torch.topk(seg_len, k=min(k_eval, Kc), largest=False, dim=-1)
+        nbr_labels = y_ref[cand_idx.gather(1, best_local.indices)]
+        weights = 1.0 / (best_local.values + 1e-4)
+        votes = torch.zeros(M, n_classes, dtype=X_eval.dtype, device=X_eval.device)
+        votes.scatter_add_(1, nbr_labels, weights)
+        return votes.argmax(dim=-1)
+
+
+def compute_coupled_subspace_factors(
+    model: MoonsMLP,
+    X_batch: torch.Tensor,
+    use_fd: bool = True,
+    metric_mode: MetricMode = "euclidean",
+    damping: float = 3e-2,
+    whitener_inv_sqrt: torch.Tensor | None = None,
+    plane_sketch: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute G^Theta-whitened DeWitt sensitivity subspaces W_hat(x_i) in R^{N x 3 x P}.
+
+    Each 3 x P block spans the parameter tangent directions that deform g(x_i; theta),
+    orthonormalized against (G^{Theta,DeWitt}(theta) + damping * I_P)^{-1/2}.
+    When plane_sketch=True (useful for high input dimension d_0 >> 2), evaluates a 2x2
+    tangent-plane pullback metric in 3N forward passes before taking parameter derivatives.
+    """
+    params = dict(model.named_parameters())
+    param_keys = list(params.keys())
+    N, d0 = X_batch.shape
+    eye2 = torch.eye(2, dtype=X_batch.dtype, device=X_batch.device).unsqueeze(0)
+
+    if plane_sketch:
+        gen = torch.Generator(device=X_batch.device).manual_seed(17)
+        Q_plane, _ = torch.linalg.qr(
+            torch.randn(d0, 2, generator=gen, dtype=X_batch.dtype, device=X_batch.device)
+        )
+    else:
+        Q_plane = None
+
+    def eval_metric_2x2(p_dict: dict[str, torch.Tensor]) -> torch.Tensor:
+        if plane_sketch and Q_plane is not None:
+            h_step = 1e-3
+            X_sh = (X_batch[:, None, :] + h_step * Q_plane.T[None, :, :]).reshape(2 * N, d0)
+            Z_all = _eval_model_batch(model, torch.cat([X_batch, X_sh], dim=0), params=p_dict)
+            dz = (Z_all[N:].reshape(N, 2, -1) - Z_all[:N, None, :]) / h_step
+            g_sub = torch.einsum("npa,nqa->npq", dz, dz)
+            return (eye2 + g_sub) if metric_mode == "graph" else (g_sub + 1e-6 * eye2)
+        g_full = (
+            compute_fd_pullback_metric(model, X_batch, metric_mode=metric_mode, params=p_dict)
+            if use_fd
+            else compute_layer_pullback_metric(
+                model, X_batch, layer_idx=model.num_layers, metric_mode=metric_mode, params=p_dict
+            )
+        )
+        return g_full[:, :2, :2]
+
+    with torch.no_grad():
+        params_det = {k: v.detach() for k, v in params.items()}
+        g0 = eval_metric_2x2(params_det)
+        g0_isq = _sym2_inv_sqrt(g0, eps=1e-3)
+
+    def sym3_features(p_dict: dict[str, torch.Tensor]) -> torch.Tensor:
+        g = eval_metric_2x2(p_dict)
+        M = torch.einsum("nij,njk,nkl->nil", g0_isq, g, g0_isq)
+        return torch.stack([M[:, 0, 0], math.sqrt(2.0) * M[:, 0, 1], M[:, 1, 1]], dim=-1).reshape(-1)
+
+    J_dict = jacfwd(sym3_features)(params)
+    U = torch.cat([J_dict[k].reshape(N, 3, -1) for k in param_keys], dim=-1)  # (N, 3, P)
+
+    if whitener_inv_sqrt is None:
+        with torch.no_grad():
+            U_det = U.detach().reshape(3 * N, -1)
+            P = U_det.shape[1]
+            G_dw = (U_det.T @ U_det) / float(N) + damping * torch.eye(
+                P, dtype=X_batch.dtype, device=X_batch.device
+            )
+            eig_vals, eig_vecs = torch.linalg.eigh(G_dw)
+            whitener_inv_sqrt = (
+                eig_vecs @ torch.diag(torch.rsqrt(torch.clamp(eig_vals, min=1e-6))) @ eig_vecs.T
+            )
+
+    W = torch.einsum("nap,pq->naq", U, whitener_inv_sqrt)
+    W_hat = W / torch.sqrt((W * W).sum(dim=(-2, -1), keepdim=True) + 1e-8)
+    return W_hat, whitener_inv_sqrt
+
+
+def coupled_subspace_orthogonality_loss(
+    model: MoonsMLP,
+    X_batch: torch.Tensor,
+    y_batch: torch.Tensor,
+    use_fd: bool = True,
+    metric_mode: MetricMode = "euclidean",
+    ortho_weight: float = 2.0,
+    plane_sketch: bool = False,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """S_C-symmetric parameter-data subspace alignment & orthogonality loss on (Theta, G^Theta).
+
+    Aligns DeWitt metric-sensitivity subspaces within each class while driving distinct classes
+    into mutually G^Theta-orthogonal subspaces of parameter space.
+    """
+    W_hat, _ = compute_coupled_subspace_factors(
+        model, X_batch, use_fd=use_fd, metric_mode=metric_mode, plane_sketch=plane_sketch
+    )
+    cross = torch.einsum("nap,mbp->nmab", W_hat, W_hat)
+    K_mat = (cross * cross).sum(dim=(-2, -1))
+
+    N = X_batch.shape[0]
+    same = (y_batch[:, None] == y_batch[None, :]).to(X_batch.dtype)
+    eye = torch.eye(N, dtype=X_batch.dtype, device=X_batch.device)
+    same_no_diag = same * (1.0 - eye)
+    diff = 1.0 - same
+
+    loss_align = ((1.0 - K_mat) * same_no_diag).sum() / torch.clamp(same_no_diag.sum(), min=1.0)
+    loss_ortho = ((K_mat**2) * diff).sum() / torch.clamp(diff.sum(), min=1.0)
+    total = loss_align + ortho_weight * loss_ortho
+
+    with torch.no_grad():
+        n_cls = int(y_batch.max().item()) + 1
+        scores = []
+        for c in range(n_cls):
+            mask_c = (y_batch == c).to(X_batch.dtype).unsqueeze(0) * (1.0 - eye)
+            scores.append((K_mat * mask_c).sum(dim=-1) / torch.clamp(mask_c.sum(dim=-1), min=1.0))
+        preds = torch.stack(scores, dim=-1).argmax(dim=-1)
+        acc = (preds == y_batch).to(X_batch.dtype).mean().item()
+        mean_same = (K_mat * same_no_diag).sum().item() / max(same_no_diag.sum().item(), 1.0)
+        mean_diff = (K_mat * diff).sum().item() / max(diff.sum().item(), 1.0)
+
+    return total, {
+        "loss_total": total.item(),
+        "geom_acc": acc,
+        "mean_same_overlap": mean_same,
+        "mean_diff_overlap": mean_diff,
+    }
+
+
+def coupled_subspace_predict(
+    model: MoonsMLP,
+    X_eval: torch.Tensor,
+    X_ref: torch.Tensor,
+    y_ref: torch.Tensor,
+    n_classes: int,
+    use_fd: bool = False,
+    metric_mode: MetricMode = "euclidean",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Classify points X_eval by Grassmannian overlap of their DeWitt tangent subspace with class subspaces."""
+    W_ref, whitener = compute_coupled_subspace_factors(
+        model, X_ref, use_fd=use_fd, metric_mode=metric_mode
+    )
+    W_eval, _ = compute_coupled_subspace_factors(
+        model, X_eval, use_fd=use_fd, metric_mode=metric_mode, whitener_inv_sqrt=whitener
+    )
+    with torch.no_grad():
+        cross = torch.einsum("nap,mbp->nmab", W_eval.detach(), W_ref.detach())
+        K_eval_ref = (cross * cross).sum(dim=(-2, -1))
+        cls_scores = torch.stack(
+            [K_eval_ref[:, y_ref == c].mean(dim=-1) for c in range(n_classes)],
+            dim=-1,
+        )
+        return cls_scores.argmax(dim=-1), cls_scores
+
+
+def fibered_dewitt_simplex_loss(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    y: torch.Tensor,
+    n_classes: int,
+    h: float = 1e-3,
+    tau: float = 0.75,
+    graph_margin: float = 0.35,
+    temperature: float = 2.0,
+    anchor_weight: float = 0.08,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Exact S_C-equidistant product-manifold DeWitt simplex loss on (Sym^+_2)^C in O(N C) time.
+
+    Expects model output width d_L == 2 * n_classes (one 2D geometric fiber per class, invariant
+    under E(2)^C translations and rotations of every fiber). Uses a single batched (d_0 + 1)*N
+    FD pass (for d_0 = 2, 3N evaluations) and computes all C product-manifold DeWitt squared
+    distances in O(N C) operations via S_rest(n) + (d^2_act(n, c) - d^2_rest(n, c)).
+    """
+    N, d0 = X.shape
+    if d0 != 2:
+        raise ValueError(f"fibered_dewitt_simplex_loss expects 2D fiber base (got d_0={d0})")
+    basis = torch.eye(2, dtype=X.dtype, device=X.device) * h
+    X_shifted = (X[:, None, :] + basis[None, :, :]).reshape(2 * N, 2)
+    Z_all = model(torch.cat([X, X_shifted], dim=0))  # (3N, 2*C)
+    z0 = Z_all[:N].reshape(N, n_classes, 2)
+    z_shift = Z_all[N:].reshape(N, 2, n_classes, 2)
+    # J_fibers: (N, C, 2_out, 2_in)
+    J_f = ((z_shift - z0[:, None, :, :]) / h).permute(0, 2, 3, 1)
+    eye2 = torch.eye(2, dtype=X.dtype, device=X.device)[None, None, :, :]
+    g_fibers = eye2 + torch.einsum("ncai,ncaj->ncij", J_f, J_f)  # (N, C, 2, 2)
+
+    # Active state diag(exp(m + 2*tau), exp(m)) vs Rest state diag(exp(m), exp(m))
+    s_act = torch.tensor(
+        [math.exp(-0.5 * (graph_margin + 2.0 * tau)), math.exp(-0.5 * graph_margin)],
+        dtype=X.dtype,
+        device=X.device,
+    )
+    s_rest = math.exp(-0.5 * graph_margin)
+    ref_two = torch.stack([torch.diag(s_act), torch.eye(2, dtype=X.dtype, device=X.device) * s_rest], dim=0)
+    d2_pair = compute_dewitt_dist_sq(g_fibers.reshape(N * n_classes, 2, 2), ref_two).reshape(N, n_classes, 2)
+    d2_act = d2_pair[:, :, 0]   # (N, C)
+    d2_rest = d2_pair[:, :, 1]  # (N, C)
+
+    # Product-manifold squared DeWitt distance to prototype c: sum_{k != c} d2_rest(k) + d2_act(c)
+    d2_prod = d2_rest.sum(dim=-1, keepdim=True) + (d2_act - d2_rest)  # (N, C)
+    loss_voronoi = F.cross_entropy(-0.5 * temperature * d2_prod, y)
+    loss_anchor = d2_prod.gather(1, y.unsqueeze(1)).mean()
+    total = loss_voronoi + anchor_weight * loss_anchor
+    with torch.no_grad():
+        acc = (d2_prod.argmin(dim=-1) == y).to(X.dtype).mean().item()
+    return total, {"loss_total": total.item(), "geom_acc": acc}
+
+
+
+# =============================================================================
+# Memory-Scalable High-Dimensional (d_0 >> 2) & Many-Class (C >> 4) Coupled Losses
+# =============================================================================
+
+
+def sym2_to_hyperboloid(
+    g: torch.Tensor,
+    eps: float = 1e-12,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map 2x2 SPD matrices g (..., 2, 2) via Sym^+_2 = R_vol x H^2 to (half_log_det, u_hyperboloid).
+
+    Here half_log_det = 0.5 * log det(g) has shape (...) and u = (u_0, u_1, u_2) has shape (..., 3)
+    satisfying the upper-sheet Minkowski hyperboloid identity u_0^2 - u_1^2 - u_2^2 = 1 (u_0 >= 1).
+    """
+    det = torch.clamp(g[..., 0, 0] * g[..., 1, 1] - g[..., 0, 1] * g[..., 1, 0], min=eps)
+    inv_sqrt_det = torch.rsqrt(det)
+    half_log_det = 0.5 * torch.log(det)
+    g00 = g[..., 0, 0] * inv_sqrt_det
+    g11 = g[..., 1, 1] * inv_sqrt_det
+    g01 = g[..., 0, 1] * inv_sqrt_det
+    u = torch.stack([0.5 * (g00 + g11), 0.5 * (g00 - g11), g01], dim=-1)
+    return half_log_det, u
+
+
+def hyperboloid_dewitt_dist_sq(
+    s_g: torch.Tensor,
+    u_g: torch.Tensor,
+    s_ref: torch.Tensor,
+    u_ref_mink: torch.Tensor,
+) -> torch.Tensor:
+    """Exact squared DeWitt geodesic distance on (Sym^+_2)^K via Minkowski inner products.
+
+    Accepts broadcastable shapes (..., K) for half-log-determinants s_g, s_ref and (..., K, 3)
+    for hyperboloid vectors u_g and Lorentz-signed prototype vectors u_ref_mink = (v_0, -v_1, -v_2),
+    summing exact squared distances across the K fibers without (N, C, 2, 2) matrix contractions.
+    """
+    cosh_d = torch.clamp((u_g * u_ref_mink).sum(dim=-1), min=1.0)
+    acosh_sq = torch.log(cosh_d + torch.sqrt(torch.clamp(cosh_d * cosh_d - 1.0, min=0.0) + 1e-12)) ** 2
+    return (2.0 * (s_g - s_ref) ** 2 + 2.0 * acosh_sq).sum(dim=-1)
+
+
+def compute_canonical_2frame(X_ref: torch.Tensor) -> torch.Tensor:
+    """Compute a deterministic top-2 PCA Stiefel 2-frame Q_0 in R^{d_0 x 2} from training inputs X_ref.
+
+    Fixing a canonical tangent 2-plane once at t = 0 avoids high-d_0 random-plane orientation washout
+    while keeping pullback metric evaluation at 3N forward passes (O(1) in d_0) and E(2)^K-invariant.
+    """
+    d0 = X_ref.shape[1]
+    if d0 == 2:
+        return torch.eye(2, dtype=X_ref.dtype, device=X_ref.device)
+    with torch.no_grad():
+        Xc = X_ref - X_ref.mean(dim=0, keepdim=True)
+        _, _, Vh = torch.linalg.svd(Xc, full_matrices=False)
+        Q0 = Vh[:2].T.clone()  # (d_0, 2)
+        for col in range(2):
+            max_idx = int(Q0[:, col].abs().argmax().item())
+            if float(Q0[max_idx, col].item()) < 0.0:
+                Q0[:, col] = -Q0[:, col]
+        return Q0.contiguous()
+
+
+def build_log_fiber_prototypes(
+    n_classes: int,
+    tau: float = 0.80,
+    graph_margin: float = 0.35,
+    n_fibers: int | None = None,
+    seed: int = 0,
+    dtype: torch.dtype = torch.float64,
+    device: str | torch.device = "cpu",
+) -> tuple[int, torch.Tensor, torch.Tensor]:
+    """Build C spherical-code metric prototypes on (Sym^+_2)^K with K = ceil(log2 C) fibers (d_L = 2K).
+
+    Uses an exact centered regular (C-1)-simplex when C <= 3K + 1 and repulsive Riesz dispersion
+    on S^{3K - 1} when C > 3K + 1, eliminating prototype crowding with O(log C) output width.
+    Returns (K, s_proto, u_proto_mink) with shapes (C, K) and (C, K, 3).
+    """
+    if n_classes < 2:
+        raise ValueError(f"n_classes must be >= 2, got {n_classes}")
+    K = max(1, math.ceil(math.log2(max(n_classes, 2)))) if n_fibers is None else int(n_fibers)
+    dim_tan = 3 * K
+
+    if n_classes <= dim_tan + 1:
+        # Exact regular (C - 1)-simplex inscribed in R^{3K} (all pairwise distances identical)
+        centered = torch.eye(n_classes, dtype=dtype, device=device) - (1.0 / float(n_classes))
+        U_svd, _, _ = torch.linalg.svd(centered, full_matrices=False)
+        simp = U_svd[:, : n_classes - 1] * math.sqrt(float(n_classes) / float(n_classes - 1))
+        V = torch.zeros(n_classes, dim_tan, dtype=dtype, device=device)
+        # Rotate into a balanced basis across all 3K coordinates via deterministic orthogonal matrix
+        gen_q = torch.Generator(device="cpu").manual_seed(seed)
+        Q_bal, _ = torch.linalg.qr(torch.randn(dim_tan, dim_tan, generator=gen_q, dtype=dtype).to(device))
+        V[:, : n_classes - 1] = simp
+        V = V @ Q_bal.T
+    else:
+        gen = torch.Generator(device="cpu").manual_seed(seed)
+        V = F.normalize(torch.randn(n_classes, dim_tan, generator=gen, dtype=dtype).to(device), dim=-1)
+        for _ in range(180):
+            V_req = V.detach().requires_grad_(True)
+            dist = torch.cdist(V_req, V_req) + torch.eye(n_classes, dtype=dtype, device=device) * 10.0
+            rep_loss = (1.0 / (dist * dist)).sum()
+            (grad_v,) = torch.autograd.grad(rep_loss, V_req)
+            with torch.no_grad():
+                V = F.normalize(V_req - 0.05 * grad_v, dim=-1)
+
+    scale = tau * math.sqrt(min(float(K), 2.0))
+    V_fib = V.reshape(n_classes, K, 3) * scale
+    base_s = tau + graph_margin
+    s_proto = base_s + V_fib[..., 0]  # (C, K)
+    r = torch.sqrt(V_fib[..., 1] ** 2 + V_fib[..., 2] ** 2 + 1e-16)
+    sinh_over_r = torch.sinh(r) / r
+    u_proto_mink = torch.stack(
+        [torch.cosh(r), -sinh_over_r * V_fib[..., 1], -sinh_over_r * V_fib[..., 2]],
+        dim=-1,
+    )
+    return K, s_proto, u_proto_mink
+
+
+def fiber_hyperboloid_coords(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    n_fibers: int,
+    frame_2d: torch.Tensor,
+    h: float = 1e-3,
+    metric_mode: MetricMode = "graph",
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Evaluate K 2x2 fiber pullback metrics along canonical 2-frame frame_2d in 3N forward passes."""
+    N, d0 = X.shape
+    X_sh = (X[:, None, :] + h * frame_2d.T[None, :, :]).reshape(2 * N, d0)
+    Z_all = model(torch.cat([X, X_sh], dim=0))  # (3N, 2*K)
+    z0 = Z_all[:N].reshape(N, n_fibers, 2)
+    z_sh = Z_all[N:].reshape(N, 2, n_fibers, 2)
+    dz = (z_sh - z0[:, None, :, :]) / h  # (N, 2_in, K, 2_out)
+    g_raw = torch.einsum("npka,nqka->nkpq", dz, dz)
+    eye2 = torch.eye(2, dtype=X.dtype, device=X.device)[None, None, :, :]
+    g_fib = (eye2 + g_raw) if metric_mode == "graph" else (g_raw + eps * eye2)
+    return sym2_to_hyperboloid(g_fib)
+
+
+def log_fiber_dewitt_loss(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    y: torch.Tensor,
+    n_fibers: int,
+    frame_2d: torch.Tensor,
+    s_proto: torch.Tensor,
+    u_proto_mink: torch.Tensor,
+    m_neg: int = 8,
+    temperature: float = 1.5,
+    anchor_weight: float = 0.12,
+    h: float = 1e-3,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """O(1)-in-d_0, O(log C)-in-C Hyperboloid DeWitt loss with sampled negative prototypes.
+
+    Evaluates K = ceil(log2 C) 2D output fibers along canonical 2-frame frame_2d (3N forward passes)
+    and computes exact DeWitt distances only to the ground-truth prototype plus m_neg negatives.
+    """
+    N = X.shape[0]
+    n_classes = s_proto.shape[0]
+    s_g, u_g = fiber_hyperboloid_coords(model, X, n_fibers, frame_2d, h=h)
+    d2_pos = hyperboloid_dewitt_dist_sq(s_g, u_g, s_proto[y], u_proto_mink[y])  # (N,)
+
+    m_eff = min(m_neg, n_classes - 1)
+    if m_eff == n_classes - 1:
+        all_c = torch.arange(n_classes, device=X.device).unsqueeze(0).expand(N, n_classes)
+        neg_idx = all_c[all_c != y.unsqueeze(1)].reshape(N, n_classes - 1)
+    else:
+        offsets = torch.randint(1, n_classes, (N, m_eff), generator=generator, device=X.device)
+        neg_idx = (y[:, None] + offsets) % n_classes
+
+    d2_neg = hyperboloid_dewitt_dist_sq(
+        s_g[:, None, :],
+        u_g[:, None, :, :],
+        s_proto[neg_idx],
+        u_proto_mink[neg_idx],
+    )  # (N, m_eff)
+
+    logits = -temperature * torch.cat([d2_pos[:, None], d2_neg], dim=1)
+    targets = torch.zeros(N, dtype=torch.long, device=X.device)
+    loss_vor = F.cross_entropy(logits, targets)
+    loss_anc = d2_pos.mean()
+    total = loss_vor + anchor_weight * loss_anc
+
+    with torch.no_grad():
+        sampled_acc = (d2_pos[:, None] < d2_neg).all(dim=-1).to(X.dtype).mean().item()
+    return total, {
+        "loss_total": total.item(),
+        "mean_dewitt_d2": loss_anc.item(),
+        "sampled_margin_acc": sampled_acc,
+    }
+
+
+def log_fiber_dewitt_predict(
+    model: MoonsMLP,
+    X_eval: torch.Tensor,
+    n_fibers: int,
+    frame_2d: torch.Tensor,
+    s_proto: torch.Tensor,
+    u_proto_mink: torch.Tensor,
+    h: float = 1e-3,
+    class_chunk: int = 64,
+) -> torch.Tensor:
+    """Memory-bounded nearest-prototype DeWitt inference on (Sym^+_2)^K in O(N K) working memory."""
+    with torch.no_grad():
+        s_g, u_g = fiber_hyperboloid_coords(model, X_eval, n_fibers, frame_2d, h=h)
+        n_classes = s_proto.shape[0]
+        best_d2 = torch.full((X_eval.shape[0],), float("inf"), dtype=X_eval.dtype, device=X_eval.device)
+        best_cls = torch.zeros(X_eval.shape[0], dtype=torch.long, device=X_eval.device)
+        for c_start in range(0, n_classes, class_chunk):
+            c_end = min(c_start + class_chunk, n_classes)
+            d2_blk = hyperboloid_dewitt_dist_sq(
+                s_g[:, None, :],
+                u_g[:, None, :, :],
+                s_proto[None, c_start:c_end, :],
+                u_proto_mink[None, c_start:c_end, :, :],
+            )
+            blk_min, blk_idx = d2_blk.min(dim=-1)
+            mask = blk_min < best_d2
+            best_d2 = torch.where(mask, blk_min, best_d2)
+            best_cls = torch.where(mask, blk_idx + c_start, best_cls)
+        return best_cls
+
+
+def midpoint_polygonal_barrier_loss(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    src_same: torch.Tensor,
+    dst_same: torch.Tensor,
+    src_diff: torch.Tensor,
+    dst_diff: torch.Tensor,
+    margin: float = 1.5,
+    beta_hinge: float = 4.0,
+    lambda_vol: float = 0.01,
+    n_sample_pairs: int | None = None,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """O(1)-in-d_0, O(1)-in-C 2-segment midpoint polygonal Riemannian barrier loss (3N forward passes).
+
+    Evaluates polygonal path energy and arc length directly in output space across sampled k-NN
+    same-class and cross-class midpoints without materializing any (d_0 x d_0) metric tensors.
+    """
+    N = X.shape[0]
+    m_pairs = N if n_sample_pairs is None else int(n_sample_pairs)
+    idx_s = torch.randint(0, src_same.shape[0], (m_pairs,), generator=generator, device=X.device)
+    idx_d = torch.randint(0, src_diff.shape[0], (m_pairs,), generator=generator, device=X.device)
+    ss, ds = src_same[idx_s], dst_same[idx_s]
+    sd, dd = src_diff[idx_d], dst_diff[idx_d]
+
+    X_mid_s = 0.5 * (X[ss] + X[ds])
+    X_mid_d = 0.5 * (X[sd] + X[dd])
+    Z_all = model(torch.cat([X, X_mid_s, X_mid_d], dim=0))  # (N + 2*m_pairs, d_L)
+    z0 = Z_all[:N]
+    zm_s = Z_all[N : N + m_pairs]
+    zm_d = Z_all[N + m_pairs :]
+
+    e_same = 2.0 * ((zm_s - z0[ss]).pow(2).sum(dim=-1) + (z0[ds] - zm_s).pow(2).sum(dim=-1))
+    l_diff = torch.sqrt((zm_d - z0[sd]).pow(2).sum(dim=-1) + 1e-8) + torch.sqrt(
+        (z0[dd] - zm_d).pow(2).sum(dim=-1) + 1e-8
+    )
+
+    loss_pull = e_same.mean()
+    loss_push = F.softplus(margin - l_diff, beta=beta_hinge).mean()
+    z_centered = z0 - z0.mean(dim=0, keepdim=True)
+    z_cov = (z_centered.T @ z_centered) / float(N) + 1e-4 * torch.eye(
+        z0.shape[1], dtype=X.dtype, device=X.device
+    )
+    loss_reg = torch.log(torch.clamp(torch.linalg.det(z_cov), min=1e-8)) ** 2
+    total = loss_pull + loss_push + lambda_vol * loss_reg
+    return total, {
+        "loss_total": total.item(),
+        "mean_d_same": torch.sqrt(torch.clamp(e_same, min=1e-10)).mean().item(),
+        "mean_d_diff": l_diff.mean().item(),
+    }
+
+
+def polygonal_barrier_knn_predict(
+    model: MoonsMLP,
+    X_eval: torch.Tensor,
+    X_ref: torch.Tensor,
+    y_ref: torch.Tensor,
+    n_classes: int,
+    k_eval: int = 7,
+    k_cand: int = 16,
+) -> torch.Tensor:
+    """Classify points X_eval by 2-segment polygonal arc-length k-NN voting without (d_0 x d_0) metrics."""
+    with torch.no_grad():
+        z_ref = model(X_ref)
+        z_eval = model(X_eval)
+        kc = min(k_cand, X_ref.shape[0])
+        cand_idx = torch.topk(torch.cdist(z_eval, z_ref), k=kc, largest=False, dim=-1).indices
+        M = X_eval.shape[0]
+        mids = 0.5 * (X_eval[:, None, :] + X_ref[cand_idx])  # (M, kc, d_0)
+        z_mids = model(mids.reshape(M * kc, -1)).reshape(M, kc, -1)
+        poly_len = torch.sqrt((z_mids - z_eval[:, None, :]).pow(2).sum(dim=-1) + 1e-10) + torch.sqrt(
+            (z_ref[cand_idx] - z_mids).pow(2).sum(dim=-1) + 1e-10
+        )
+        best_local = torch.topk(poly_len, k=min(k_eval, kc), largest=False, dim=-1)
+        nbr_labels = y_ref[cand_idx.gather(1, best_local.indices)]
+        weights = 1.0 / (best_local.values + 1e-4)
+        votes = torch.zeros(M, n_classes, dtype=X_eval.dtype, device=X_eval.device)
+        votes.scatter_add_(1, nbr_labels, weights)
+        return votes.argmax(dim=-1)
+
+
+def gram_subspace_orthogonality_loss(
+    W_hat: torch.Tensor,
+    y: torch.Tensor,
+    ortho_weight: float = 2.5,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """O(N r + B_c r^2) Grassmannian alignment + off-diagonal orthogonality via the r x r Gram matrix.
+
+    Uses the exact trace identity sum_{a != b} ||W_a W_b^T||_F^2 = ||sum_c W_c^T W_c||_F^2 - sum_c ||W_c W_c^T||_F^2
+    on normalized class-mean subspaces W_c in R^{3 x r}, eliminating both O(N^2) and O(C^2) tensors.
+    """
+    _, _, r_dim = W_hat.shape
+    uniq_y, inv_idx = torch.unique(y, sorted=True, return_inverse=True)
+    b_cls = uniq_y.shape[0]
+
+    counts = torch.zeros(b_cls, dtype=W_hat.dtype, device=W_hat.device).scatter_add_(
+        0, inv_idx, torch.ones_like(inv_idx, dtype=W_hat.dtype)
+    )
+    W_cls = torch.zeros(b_cls, 3, r_dim, dtype=W_hat.dtype, device=W_hat.device)
+    W_cls.index_add_(0, inv_idx, W_hat)
+    W_cls = W_cls / counts[:, None, None]
+    W_cls = W_cls / torch.sqrt((W_cls * W_cls).sum(dim=(-2, -1), keepdim=True) + 1e-8)
+
+    W_target = W_cls[inv_idx]
+    overlap_self = (torch.einsum("nar,nbr->nab", W_hat, W_target) ** 2).sum(dim=(-2, -1))
+    loss_align = (1.0 - overlap_self).mean()
+
+    M_flat = W_cls.reshape(3 * b_cls, r_dim)
+    gram_total = M_flat.T @ M_flat  # (r_dim, r_dim)
+    total_sq = (gram_total * gram_total).sum()
+    diag_sq = (torch.einsum("car,cbr->cab", W_cls, W_cls) ** 2).sum()
+    denom = max(float(b_cls * (b_cls - 1)), 1.0)
+    off_diag_mean = torch.clamp(total_sq - diag_sq, min=0.0) / denom
+    total = loss_align + ortho_weight * off_diag_mean
+
+    return total, {
+        "loss_total": total.item(),
+        "mean_self_overlap": overlap_self.mean().item(),
+        "mean_cross_cls_sq": off_diag_mean.item(),
+    }
+
+
+def compute_analytic_head_subspaces(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    frame_2d: torch.Tensor,
+    h: float = 1e-3,
+    damping: float = 3e-2,
+    whitener_inv_sqrt: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Closed-form analytic head-parameter DeWitt subspaces U_head(x) = d(g_0^{-1/2} g g_0^{-1/2})/dW_L.
+
+    Requires only 3N standard 1st-order forward passes (zero jacfwd, zero 2nd-order autograd),
+    with subspace width P_head = 2 * d_{L-1} strictly independent of ambient input dimension d_0.
+    """
+    N, d0 = X.shape
+    X_3N = torch.cat([X, (X[:, None, :] + h * frame_2d.T[None, :, :]).reshape(2 * N, d0)], dim=0)
+    feat = model.forward_up_to_layer(X_3N, model.num_layers - 1)
+    W_L = model.layers[-1].weight  # (2, d_hid)
+    if W_L.shape[0] != 2:
+        raise ValueError(f"compute_analytic_head_subspaces expects d_L == 2, got {W_L.shape[0]}")
+
+    H_j = (feat[N:].reshape(N, 2, -1) - feat[:N, None, :]) / h  # (N, 2_in, d_hid)
+    J_z = torch.einsum("oa,npa->npo", W_L, H_j)  # (N, 2_in, 2_out)
+    eye2 = torch.eye(2, dtype=X.dtype, device=X.device).unsqueeze(0)
+    g = eye2 + torch.einsum("npo,nqo->npq", J_z, J_z)
+
+    with torch.no_grad():
+        g0_isq = _sym2_inv_sqrt(g.detach(), eps=1e-4)
+
+    H_tilde = torch.einsum("nip,npa->nia", g0_isq, H_j)  # (N, 2, d_hid)
+    Z_tilde = torch.einsum("nip,npo->nio", g0_isq, J_z)  # (N, 2, 2)
+    u00 = 2.0 * Z_tilde[:, 0, :, None] * H_tilde[:, 0, None, :]
+    u01 = math.sqrt(2.0) * (
+        Z_tilde[:, 0, :, None] * H_tilde[:, 1, None, :] + Z_tilde[:, 1, :, None] * H_tilde[:, 0, None, :]
+    )
+    u11 = 2.0 * Z_tilde[:, 1, :, None] * H_tilde[:, 1, None, :]
+    U = torch.stack([u00.reshape(N, -1), u01.reshape(N, -1), u11.reshape(N, -1)], dim=1)  # (N, 3, 2*d_hid)
+    p_head = U.shape[-1]
+
+    if whitener_inv_sqrt is None:
+        with torch.no_grad():
+            U_det = U.detach().reshape(3 * N, p_head)
+            G_h = (U_det.T @ U_det) / float(N) + damping * torch.eye(p_head, dtype=X.dtype, device=X.device)
+            ev, evec = torch.linalg.eigh(G_h)
+            whitener_inv_sqrt = evec @ torch.diag(torch.rsqrt(torch.clamp(ev, min=1e-6))) @ evec.T
+
+    W = torch.einsum("nap,pq->naq", U, whitener_inv_sqrt)
+    W_hat = W / torch.sqrt((W * W).sum(dim=(-2, -1), keepdim=True) + 1e-8)
+    return W_hat, whitener_inv_sqrt
+
+
+def analytic_head_subspace_loss(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    y: torch.Tensor,
+    frame_2d: torch.Tensor,
+    ortho_weight: float = 2.5,
+    h: float = 1e-3,
+    damping: float = 3e-2,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """O(1)-in-d_0, O(1)-in-C 1st-order Analytic Head-Block Coupled Subspace loss via Gram identity."""
+    W_hat, _ = compute_analytic_head_subspaces(model, X, frame_2d, h=h, damping=damping)
+    return gram_subspace_orthogonality_loss(W_hat, y, ortho_weight=ortho_weight)
+
+
+def analytic_head_subspace_predict(
+    model: MoonsMLP,
+    X_eval: torch.Tensor,
+    X_ref: torch.Tensor,
+    y_ref: torch.Tensor,
+    n_classes: int,
+    frame_2d: torch.Tensor,
+    h: float = 1e-3,
+    damping: float = 3e-2,
+) -> torch.Tensor:
+    """Classify X_eval by alignment with class-mean Analytic Head DeWitt subspaces (O(N * P_head) memory)."""
+    with torch.no_grad():
+        W_ref, wh = compute_analytic_head_subspaces(model, X_ref, frame_2d, h=h, damping=damping)
+        W_eval, _ = compute_analytic_head_subspaces(
+            model, X_eval, frame_2d, h=h, damping=damping, whitener_inv_sqrt=wh
+        )
+        p_head = W_ref.shape[-1]
+        counts = torch.zeros(n_classes, dtype=X_eval.dtype, device=X_eval.device).scatter_add_(
+            0, y_ref, torch.ones_like(y_ref, dtype=X_eval.dtype)
+        )
+        W_cls = torch.zeros(n_classes, 3, p_head, dtype=X_eval.dtype, device=X_eval.device)
+        W_cls.index_add_(0, y_ref, W_ref)
+        W_cls = W_cls / torch.clamp(counts[:, None, None], min=1.0)
+        W_cls = W_cls / torch.sqrt((W_cls * W_cls).sum(dim=(-2, -1), keepdim=True) + 1e-8)
+        scores = (torch.einsum("nap,cbp->ncab", W_eval, W_cls) ** 2).sum(dim=(-2, -1))
+        return scores.argmax(dim=-1)
+
+
+def compute_sketched_param_subspaces(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    frame_2d: torch.Tensor,
+    r_probes: int = 6,
+    eps_theta: float = 1e-3,
+    h: float = 1e-3,
+    damping: float = 3e-2,
+    v_orth: torch.Tensor | None = None,
+    whitener_inv_sqrt: torch.Tensor | None = None,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Full-parameter r-probe 1st-order FD DeWitt sensitivity subspaces W_hat in R^{N x 3 x r}."""
+    N, d0 = X.shape
+    params = dict(model.named_parameters())
+    keys = list(params.keys())
+    shapes = [params[k].shape for k in keys]
+    numels = [params[k].numel() for k in keys]
+    p_tot = sum(numels)
+
+    if v_orth is None:
+        v_raw = torch.randn(p_tot, r_probes, generator=generator, dtype=X.dtype, device=X.device)
+        v_orth, _ = torch.linalg.qr(v_raw)
+
+    X_3N = torch.cat([X, (X[:, None, :] + h * frame_2d.T[None, :, :]).reshape(2 * N, d0)], dim=0)
+    eye2 = torch.eye(2, dtype=X.dtype, device=X.device).unsqueeze(0)
+
+    def eval_g(p_dict: dict[str, torch.Tensor]) -> torch.Tensor:
+        z_all = functional_call(model, p_dict, (X_3N,))
+        dz = (z_all[N:].reshape(N, 2, -1) - z_all[:N, None, :]) / h
+        return eye2 + torch.einsum("npa,nqa->npq", dz, dz)
+
+    with torch.no_grad():
+        g0_isq = _sym2_inv_sqrt(eval_g({k: v.detach() for k, v in params.items()}), eps=1e-4)
+
+    def sym3(p_dict: dict[str, torch.Tensor]) -> torch.Tensor:
+        g = eval_g(p_dict)
+        M = torch.einsum("nij,njk,nkl->nil", g0_isq, g, g0_isq)
+        return torch.stack([M[:, 0, 0], math.sqrt(2.0) * M[:, 0, 1], M[:, 1, 1]], dim=-1)
+
+    m0 = sym3(params)
+    u_cols = []
+    for q in range(v_orth.shape[1]):
+        splits = torch.split(v_orth[:, q], numels)
+        p_shift = {
+            k: params[k] + eps_theta * sc.reshape(sh)
+            for k, sc, sh in zip(keys, splits, shapes, strict=True)
+        }
+        u_cols.append((sym3(p_shift) - m0) / eps_theta)
+    U_r = torch.stack(u_cols, dim=-1)  # (N, 3, r)
+    r_eff = U_r.shape[-1]
+
+    if whitener_inv_sqrt is None:
+        with torch.no_grad():
+            U_det = U_r.detach().reshape(3 * N, r_eff)
+            G_r = (U_det.T @ U_det) / float(N) + damping * torch.eye(r_eff, dtype=X.dtype, device=X.device)
+            ev, evec = torch.linalg.eigh(G_r)
+            whitener_inv_sqrt = evec @ torch.diag(torch.rsqrt(torch.clamp(ev, min=1e-6))) @ evec.T
+
+    W = torch.einsum("nar,rq->naq", U_r, whitener_inv_sqrt)
+    W_hat = W / torch.sqrt((W * W).sum(dim=(-2, -1), keepdim=True) + 1e-8)
+    return W_hat, v_orth, whitener_inv_sqrt
+
+
+def sketched_param_subspace_loss(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    y: torch.Tensor,
+    frame_2d: torch.Tensor,
+    r_probes: int = 6,
+    ortho_weight: float = 2.5,
+    eps_theta: float = 1e-3,
+    h: float = 1e-3,
+    damping: float = 3e-2,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Full-network r-probe 1st-order FD Coupled Subspace loss via r x r DeWitt whitener & Gram identity."""
+    W_hat, _, _ = compute_sketched_param_subspaces(
+        model,
+        X,
+        frame_2d,
+        r_probes=r_probes,
+        eps_theta=eps_theta,
+        h=h,
+        damping=damping,
+        generator=generator,
+    )
+    return gram_subspace_orthogonality_loss(W_hat, y, ortho_weight=ortho_weight)
+
+
+def sketched_param_subspace_predict(
+    model: MoonsMLP,
+    X_eval: torch.Tensor,
+    X_ref: torch.Tensor,
+    y_ref: torch.Tensor,
+    n_classes: int,
+    frame_2d: torch.Tensor,
+    r_probes: int = 12,
+    n_ensembles: int = 3,
+    seed: int = 0,
+) -> torch.Tensor:
+    """Classify X_eval by averaging class-mean subspace overlap across n_ensembles r-probe sketches."""
+    with torch.no_grad():
+        gen = torch.Generator(device=X_eval.device).manual_seed(seed)
+        scores_acc = torch.zeros(X_eval.shape[0], n_classes, dtype=X_eval.dtype, device=X_eval.device)
+        counts = torch.zeros(n_classes, dtype=X_eval.dtype, device=X_eval.device).scatter_add_(
+            0, y_ref, torch.ones_like(y_ref, dtype=X_eval.dtype)
+        )
+        for _ in range(n_ensembles):
+            W_ref, v_orth, wh = compute_sketched_param_subspaces(
+                model, X_ref, frame_2d, r_probes=r_probes, generator=gen
+            )
+            W_eval, _, _ = compute_sketched_param_subspaces(
+                model, X_eval, frame_2d, r_probes=r_probes, v_orth=v_orth, whitener_inv_sqrt=wh
+            )
+            W_cls = torch.zeros(n_classes, 3, r_probes, dtype=X_eval.dtype, device=X_eval.device)
+            W_cls.index_add_(0, y_ref, W_ref)
+            W_cls = W_cls / torch.clamp(counts[:, None, None], min=1.0)
+            W_cls = W_cls / torch.sqrt((W_cls * W_cls).sum(dim=(-2, -1), keepdim=True) + 1e-8)
+            scores_acc += (torch.einsum("nar,cbr->ncab", W_eval, W_cls) ** 2).sum(dim=(-2, -1))
+        return scores_acc.argmax(dim=-1)
