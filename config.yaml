@@ -3,9 +3,11 @@
 dataset:
   # Scikit-learn synthetic dataset generator
   # Options: "moons", "circles", "blobs", "classification", "gaussian_quantiles"
-  name: "circles"
-  n_classes: 2
+  name: "blobs"
+  n_classes: 5
   params:
+    centers: 5
+    cluster_std: 1.0
     n_train: 240
     n_test: 120
     noise: 0.2
@@ -18,9 +20,9 @@ dataset:
 
 model:
   # Sequence of integers specifying [input_dim, *hidden_dims, output_dim]
-  layer_dims: [2, 10, 2]
+  layer_dims: [2, 10, 20, 10, 2]
   # layer_dims: [2, 5, 10, 15, 10, 2]
   # Activation options:
   # "tanh", "gelu", "silu", "softplus", "elu", "sigmoid", "sin", "relu", "identity", "softmax", "log_softmax"
-  hidden_activation: "tanh"
+  hidden_activation: "gelu"
   output_activation: "identity"

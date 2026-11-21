@@ -1143,3 +1143,179 @@ Extended all dimension and class-count sweeps and charts across Sections 1, 3, 4
 4. **Section 5 — Simultaneous Joint Diagonal (`d_0 = C = 4 -> 4096`, `N = 256`)**:
    - **`2048 x 2048`** (`d_L(LogFib) = 22`): `SGD+CE`: `2.80 ms / 17.52 MB` | `LogFib-DeWitt`: **`6.93 ms / 41.34 MB`** | `Midpt-Barrier`: **`4.05 ms / 46.26 MB`** | `Head-Subsp`: **`8.74 ms / 47.83 MB`** | `ParamFD-Subsp`: **`35.77 ms / 63.68 MB`**.
    - **`4096 x 4096`** (`d_L(LogFib) = 24`): `SGD+CE`: `5.20 ms / 34.54 MB` | `LogFib-DeWitt`: **`10.71 ms / 70.88 MB`** | `Head-Subsp`: **`11.63 ms / 76.36 MB`** | `Midpt-Barrier`: **`6.10 ms / 90.76 MB`** | `ParamFD-Subsp`: **`56.09 ms / 112.71 MB`**.
+
+
+---
+
+## Turn 30
+
+### User
+explain DeWitt / Ebin metric  and why and when is it used in this project 
+
+### Assistant
+### 1. What Is the DeWitt / Ebin Metric?
+
+In standard deep learning, a parameter vector $\theta \in \Theta$ maps an input $x \in \mathcal{M}$ to an output vector $z(x; \theta) \in \mathbb{R}^{d_L}$. In **geometric deep learning on pullback manifolds**, however, the object the network is sculpting is not a vector of logits—it is an entire **Riemannian metric field** $x \mapsto g(x; \theta) \in \mathrm{Sym}^+_d$ on the data space $\mathcal{M}$.
+
+To measure distances or take steepest-descent (Natural Gradient) steps on a space whose "points" are **metrics themselves**, we need a **metric on the space of metrics** $\mathrm{Met}(\mathcal{M})$:
+
+1. **Pointwise Level — Affine-Invariant Metric on the SPD Cone $\mathrm{Sym}^+_d$**:
+   At a single data point $x$, $g(x) \in \mathrm{Sym}^+_d$ is a $d \times d$ symmetric positive-definite matrix. For two tangent perturbations $h, k \in T_{g}\mathrm{Sym}^+_d$ (symmetric matrices representing infinitesimal metric changes $\delta g$), the **affine-invariant Riemannian metric** is:
+   $$\langle h, k \rangle_{g} = \mathrm{Tr}\!\left(g^{-1}\, h\, g^{-1}\, k\right) = \left\langle g^{-1/2}\, h\, g^{-1/2},\; g^{-1/2}\, k\, g^{-1/2} \right\rangle_F$$
+   - Under this metric, $(\mathrm{Sym}^+_d, \langle \cdot, \cdot \rangle)$ is a **Hadamard manifold** (complete, simply connected, non-positively curved: $\mathrm{Sym}^+_2 \cong \mathbb{R}_{\mathrm{vol}} \times \mathbb{H}^2$).
+   - The boundary of singular/collapsed matrices ($\det g = 0$) lies at **infinite geodesic distance**, and the exact geodesic distance between two SPD matrices $g_1, g_2 \in \mathrm{Sym}^+_d$ is:
+     $$d_{\mathrm{AI}}(g_1, g_2) = \left\| \log\!\Big(g_1^{-1/2}\, g_2\, g_1^{-1/2}\Big) \right\|_F = \sqrt{\sum_{i=1}^d \big(\log \lambda_i(g_1^{-1} g_2)\big)^2}$$
+
+2. **Global Field Level — The Ebin / DeWitt $L^2$ Metric on $\mathrm{Met}(\mathcal{M})$**:
+   Integrating this pointwise inner product over all $x \in \mathcal{M}$ (with either the empirical data measure $d\mathbb{P}(x)$ or the intrinsic Riemannian volume element $\sqrt{\det g(x)}\,dx$) yields the **Ebin metric** (**David Ebin, 1970**, global analysis on the manifold of Riemannian metrics; **Bryce DeWitt, 1967**, *supermetric* on 3-geometries in canonical general relativity, where the trace-term coefficient $\lambda$ is fixed to $\lambda = 0$ so the metric is strictly positive-definite rather than Lorentzian):
+   $$\mathcal{G}_{\mathrm{Ebin}}(h, k)_{g} = \int_{\mathcal{M}} \mathrm{Tr}\!\Big(g(x)^{-1}\, h(x)\, g(x)^{-1}\, k(x)\Big)\, w(x)\, d\mu(x)$$
+
+3. **Parameter-Space Pullback — Coupling $\Theta \leftrightarrow \mathcal{M}$**:
+   Pulling $\mathcal{G}_{\mathrm{Ebin}}$ back through the neural network map $\theta \mapsto g(\cdot; \theta)$ defines a $P \times P$ Riemannian metric directly on the **parameter manifold $\Theta$**:
+   $$G^{\Theta,\mathrm{DeWitt}}_{\mu\nu}(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\!\left[ w(x)\, \mathrm{Tr}\!\Big(g(x; \theta)^{-1}\, \partial_{\theta_\mu} g(x; \theta)\, g(x; \theta)^{-1}\, \partial_{\theta_\nu} g(x; \theta)\Big) \right]$$
+
+---
+
+### 2. Why Is It Used in This Project?
+
+Training neural networks through **intrinsic geometric losses** (volume, anisotropy, curvature, geodesic barriers) breaks standard coordinate-based optimizers and metrics for four fundamental reasons—each directly solved by the DeWitt / Ebin geometry:
+
+1. **Quotients Out Rigid Output Gauge Symmetries ($E(d_L) = O(d_L) \ltimes \mathbb{R}^{d_L}$)**:
+   - Every intrinsic geometric quantity ($g = J^T J$ or $I + J^T J$, $\det g$, $K(x)$) is **100% invariant** under global orthogonal rotations/reflections and translations of the network output $z(x) \mapsto Q z(x) + b$ ($Q \in O(d_L), b \in \mathbb{R}^{d_L}$).
+   - Standard coordinate Gauss–Newton or Fisher matrices ($J_\theta z^T J_\theta z$, `compute_uncoupled_coord_metric`) assign **large positive stiffness** to these pure gauge directions—wasting preconditioner capacity resisting harmless output rotations/translations.
+   - Because $\partial_\theta g = 0$ along any rigid motion of $z$, **$G^{\Theta,\mathrm{DeWitt}}(\theta)$ assigns exact zero norm ($\ker G^{\Theta,\mathrm{DeWitt}} \supseteq \mathfrak{e}(d_L)$) to output gauge symmetries**, conditioning *only* genuine deformations of data-space geometry.
+
+2. **Relative Scale Invariance & Protection Against Metric Collapse ($\mathrm{GL}(d, \mathbb{R})$ Invariance)**:
+   - Euclidean Frobenius norm $\|\delta g\|_F^2$ treats a change of $0.01$ identically whether $g \approx 100\,I$ (a tiny $0.01\%$ tweak on a steep decision wall) or $g \approx 0.01\,I$ (a catastrophic $100\%$ singular collapse inside a contracted class basin!).
+   - Whitening via $g^{-1/2} \delta g\, g^{-1/2}$ measures **multiplicative / logarithmic strain** ($\delta \log g$): singular rank collapse ($\det g \to 0$) is pushed to $d_{\mathrm{AI}} = +\infty$, and conditioning automatically adapts across both compressed class interiors ($\det g \ll 1$) and magnified decision boundaries ($\det g \gg 1$).
+
+3. **Eliminates Artificial 1D Class Ordering in Multiclass Classification**:
+   - Scalar geometric losses ($\log\sqrt{\det g}, \log(g_{11}/g_{22}), K$) force $C \ge 3$ unordered classes onto a 1D number line (`-2τ, 0, +2τ`), creating unequal class spacing and Intermediate-Value Theorem (IVT) phantom fringes.
+   - Under the DeWitt metric, $\mathrm{Sym}^+_2 \cong \mathbb{R}_{\mathrm{vol}} \times \mathbb{H}^2$ is a **3D curved manifold** (and $(\mathrm{Sym}^+_2)^K$ has dimension $3K$), allowing us to place $C$ target metrics at **equidistant simplex / spherical-code vertices** measured by $d_{\mathrm{AI}}$—with exact $S_C$ permutation symmetry and `0.0%` phantom fringes.
+
+4. **Exact Gauss–Newton Duality**:
+   - When the data-space loss is squared DeWitt geodesic distance $\mathcal{L}(\theta) = \frac{1}{2N}\sum_n d_{\mathrm{AI}}^2(g(x_n; \theta), G^*_{y_n})$, its Generalized Gauss–Newton Hessian on parameter space $\Theta$ **is literally $G^{\Theta,\mathrm{DeWitt}}(\theta)$**—unifying the loss geometry on $\mathcal{M}$ and the optimization geometry on $\Theta$.
+
+---
+
+### 3. When & Where Is It Used Across This Project?
+
+The DeWitt / Ebin metric is used in **three distinct roles** across [src/diffgeom/geometry.py](src/diffgeom/geometry.py) and Notebooks `06`–`09`:
+
+| Role | Functions in `src/diffgeom/geometry.py` | Notebooks | When to Use It |
+| :--- | :--- | :---: | :--- |
+| **A. Parameter-Space Natural Gradient Preconditioner** ($G^{\Theta,\mathrm{DeWitt}}$) | `compute_coupled_dewitt_metric`, `compute_coupled_geometric_metric`, `woodbury_coupled_ngd_direction` | `06`, `07`, `08` | **During optimization** when training any geometric loss (Curvature, Volume, Anisotropy, or DeWitt Simplex) and ill-conditioning / $E(d_L)$ gauge drift slows first-order SGD. Use `woodbury_coupled_ngd_direction` ($O(S^2 P)$) rather than dense $P \times P$ inversion when $P$ is large. |
+| **B. Direct Data-Space Multiclass Loss & Prototype Classifier** ($d_{\mathrm{AI}}^2$ on $\mathrm{Sym}^+_2$ / $(\mathrm{Sym}^+_2)^K$) | `compute_dewitt_dist_sq`, `dewitt_simplex_loss`, `fibered_dewitt_simplex_loss`, `sym2_to_hyperboloid`, `hyperboloid_dewitt_dist_sq`, `log_fiber_dewitt_loss`, `log_fiber_dewitt_predict` | `08`, `09` | **As the classification loss and standalone test-time rule** whenever $C \ge 3$ (eliminating 1D ordering & IVT fringes). Use single-fiber `dewitt_simplex_loss` for low-dim $C \le 4$, and **`log_fiber_dewitt_loss`** ($K = \lceil\log_2 C\rceil$, Hyperboloid isometry + canonical PCA 2-frame $Q_0$) when $d_0 \gg 2$ or $C \gg 4$ (up to $4096 \times 4096$). |
+| **C. Coupled $\Theta \leftrightarrow \mathcal{M}$ Subspace Orthogonality** ($G^\Theta$-whitened Grassmannian kernel) | `compute_coupled_subspace_factors`, `coupled_subspace_orthogonality_loss`, `analytic_head_subspace_loss`, `sketched_param_subspace_loss` | `08`, `09` | **When you want non-interfering parameter subspaces across classes** ($\mathcal{V}_a \perp_{G^\Theta} \mathcal{V}_b$). Whitens parameter Jacobians $g_0^{-1/2}\partial_\theta g\,g_0^{-1/2}$ by $(G^{\Theta,\mathrm{DeWitt}} + \lambda I)^{-1/2}$; use `analytic_head_subspace_loss` or `sketched_param_subspace_loss` (`09`) for $O(1)$-memory scaling. |
+
+#### When Is It *Not* Used?
+- **Standard Coordinate Cross-Entropy (`Notebooks 01, 03`)**: Logits *depend* on output coordinates and rotations, so the classical **Parameter Fisher Information Matrix** (`compute_parameter_fim` in Notebook `03`) is the canonical parameter metric instead.
+- **Pure Geodesic Barrier Training under First-Order SGD/Adam (`geodesic_barrier_loss` / `midpoint_polygonal_barrier_loss` in `08`, `09`)**: Separates classes via relational path length $\int \sqrt{\dot\gamma^T g\,\dot\gamma}\,dt$ on $\mathcal{M}$ directly without needing SPD prototype targets or $G^\Theta$ whitening.
+
+
+---
+
+## Turn 31
+
+### User
+why do we need to measure distances between metrics?
+
+### Assistant
+### The Core Shift: What Is the Network's "Output" at $x$?
+
+In **standard classification**, a neural network maps each input $x$ to a **probability distribution** $p(y \mid x; \theta)$ (via logits $z(x; \theta) \in \mathbb{R}^C$). Everything in training and optimization comes down to comparing two distributions:
+- **Loss / Inference**: Compare the predicted distribution $p(\cdot \mid x; \theta)$ to the target label distribution $e_y$ (via Cross-Entropy / KL divergence).
+- **Natural Gradient**: Compare the current model $p(\cdot \mid x; \theta)$ to a perturbed model $p(\cdot \mid x; \theta + \Delta\theta)$ via KL divergence, whose 2nd-order Taylor expansion gives the **Fisher Information Matrix**.
+
+In **purely geometric classification**, we intentionally discard coordinate logits so the model depends only on **intrinsic representation geometry** (invariant to rotations/translations $z \mapsto Qz + b$). Once logits are gone, the coordinate-free object the network produces at each point $x$ is **no longer a vector—it is a local Riemannian metric tensor $g(x; \theta) \in \mathrm{Sym}^+_d$** (visualized as a Tissot ellipse encoding local volume stretching and directional shear).
+
+As soon as the network's output at $x$ is a **metric**, three fundamental operations require measuring distances between metrics:
+
+---
+
+### 1. Supervision & Anchor-Free Test Inference: Comparing $g(x_n; \theta)$ to Class Prototypes $G^*_c$
+- **Training**: Suppose Class `0`, Class `1`, and Class `2` are assigned three symmetric target geometries $G^*_0, G^*_1, G^*_2 \in \mathrm{Sym}^+_2$ (e.g., Tissot ellipses rotated at $0^\circ, 60^\circ, 120^\circ$ in Notebook `08`, or logarithmic spherical-code fibers in Notebook `09`). Pulling $g(x_n; \theta)$ toward its ground-truth prototype $G^*_{y_n}$ and away from $G^*_{c \neq y_n}$ requires a distance $d_{\mathrm{AI}}\!\big(g(x_n; \theta), G^*_c\big)$.
+- **Test-time prediction**: For a single unseen point $x^*$, we evaluate its local metric $g(x^*; \theta)$ and pick the nearest prototype:
+  $$\hat{y}(x^*) = \arg\min_{c} d_{\mathrm{AI}}\!\big(g(x^*; \theta),\, G^*_c\big)$$
+  without needing to store or search $k$-NN training points!
+- *Why not collapse $g(x)$ to a single number (like $\det g$) and use 1D scalar differences?* Because $\mathrm{Sym}^+_2$ is 3-dimensional; projecting it onto a 1D number line throws away 2 degrees of freedom and forces artificial class ordering (`Class 0 < Class 1 < Class 2`) and Intermediate-Value Theorem phantom boundaries (Notebook `08`, Section 1).
+
+---
+
+### 2. Natural Gradient & Non-Interfering Optimization: Comparing $g(\cdot; \theta)$ to $g(\cdot; \theta + \Delta\theta)$
+Every steepest-descent optimizer solves:
+$$\Delta\theta^* = \arg\min_{\Delta\theta} \langle \nabla_\theta \mathcal{L}(\theta),\, \Delta\theta \rangle \quad \text{subject to} \quad \mathrm{Dist}\big(\text{model}(\theta),\, \text{model}(\theta + \Delta\theta)\big)^2 \le \varepsilon^2.$$
+- Euclidean SGD uses $\|\Delta\theta\|_2^2$, which measures **weight-coordinate movement** rather than **geometric change**: rotating the output layer $W_L \mapsto Q W_L$ produces a large $\|\Delta\theta\|_2 > 0$ even though $g(x; \theta)$ has changed by **zero**, whereas a tiny $\Delta\theta$ near a singular layer can distort data-space geometry enormously.
+- Measuring the squared DeWitt distance between **before-step** and **after-step** metric fields:
+  $$\mathbb{E}_x\!\Big[ d_{\mathrm{AI}}\!\big(g(x; \theta),\, g(x; \theta + \Delta\theta)\big)^2 \Big] = \Delta\theta^T\, G^{\Theta,\mathrm{DeWitt}}(\theta)\, \Delta\theta + O(\|\Delta\theta\|^3)$$
+  plays the **exact same role for Riemannian metrics that KL divergence plays for probability distributions** in Amari's Natural Gradient (Notebooks `06`–`09`).
+
+---
+
+### 3. Why Naive Matrix Subtraction $\|g_1 - g_2\|_F$ Breaks on Metrics
+Even if you agree we must compare two matrices $g_1, g_2 \in \mathrm{Sym}^+_d$, treating them as flat vectors via Frobenius norm $\|g_1 - g_2\|_F$ fails for three geometric reasons:
+1. **Singular Collapse Is at Finite Distance**: The zero matrix $g = 0$ (where space collapses to a point, $\det g = 0$, and curvature $K \propto 1/\det g$ explodes) is only Euclidean distance $\sqrt{2}$ from $I_2$. Under $d_{\mathrm{AI}}$, $\det g = 0$ is at **infinite distance** ($\log 0 = -\infty$), naturally repelling optimization from rank collapse.
+2. **Expansion/Contraction Asymmetry**: Stretching space by $10\times$ ($g = 100 I$) and shrinking by $10\times$ ($g = 0.01 I$) are exact geometric inverses, yet $\|100I - I\|_F = 99\sqrt{2}$ vs. $\|0.01I - I\|_F = 0.99\sqrt{2}$ ($100\times$ bias!). Under $d_{\mathrm{AI}}$, $|\log 100| = |\log 0.01|$—expansion and contraction are treated symmetrically.
+3. **Coordinate-Rescaling Dependence**: Linearly rescaling input coordinates $x \mapsto A^{-1} x$ transforms metrics by congruence $g \mapsto A^T g A$, scrambling $\|g_1 - g_2\|_F$, whereas $d_{\mathrm{AI}}(A^T g_1 A, A^T g_2 A) = d_{\mathrm{AI}}(g_1, g_2)$ is **strictly invariant**.
+
+---
+
+### Important Contrast: When You *Don't* Need Distances Between Metrics
+Not every geometric loss requires comparing two metrics! In the **Geodesic Metric-Barrier** formulation (`geodesic_barrier_loss` in Notebook `08` and `midpoint_polygonal_barrier_loss` in Notebook `09`), we never compare $g(x)$ to another metric $G^*$. Instead, we use the single learned metric $g(\cdot; \theta)$ as a **ruler to measure path lengths between pairs of data points** $(x_i, x_j)$—pulling same-class neighbors together and erecting high-metric walls between different classes. The trade-off is at **test time**: because classes do not have distinct local metric prototypes $G^*_c$, classifying a new point $x^*$ requires measuring geodesic distance to training anchors ($k$-NN), whereas prototype-based DeWitt losses classify $x^*$ from $g(x^*; \theta)$ alone in $O(1)$ without anchors.
+
+
+---
+
+## Turn 32
+
+### User
+in notebook 05 I cannot experiment with a blobs dataset with 5 classes, please fix it
+
+### Assistant
+Fixed four issues that prevented multi-class `blobs` (`N_CLASSES = 5`) from working cleanly in [notebooks/05_geometric_loss_ablations_and_synthesis.ipynb](notebooks/05_geometric_loss_ablations_and_synthesis.ipynb) and [src/diffgeom/geometry.py](src/diffgeom/geometry.py):
+
+1. **`centers` vs. `n_classes` Synchronization (`geometry.py` & Notebook `05` Cell 1)**:
+   - Synchronized `centers` and `n_classes` in `get_synthetic_dataset` (`key == "blobs"`) and moved `CE_LAYER_DIMS = [*LAYER_DIMS[:-1], max(LAYER_DIMS[-1], N_CLASSES)]` *after* loading `y_train`/`y_test` (`N_CLASSES = max(N_CLASSES, int(max(y_train.max(), y_test.max())) + 1)`), preventing `IndexError: Target out of bounds` in `CrossEntropyLoss` when `centers` and `n_classes` differ.
+2. **Restored `scikit-learn`'s Standard `center_box = (-10.0, 10.0)` for `make_blobs` (`geometry.py` L105)**:
+   - Previously, `get_synthetic_dataset` overrode `center_box` to `(-3.0, 3.0)`, cramming 5 clusters with `cluster_std = 1.0` on top of one another (`CE` stalled at `~63%` and geometric losses at `~38%–45%`). Restoring `(-10.0, 10.0)` (followed by standard zero-mean/unit-std normalization) produces cleanly separated 5-class clusters.
+3. **Class-Count-Adaptive Band Margins, Regularizers & Training Epochs (Notebook `05` Cells 3, 13 & 15)**:
+   - Binary margins (`0.60` for Volume, `0.45` for Anisotropy, `0.40` for Curvature) forced extreme outer targets at `N_CLASSES = 5` (e.g., $t_4 = +2.4 \implies \det g \approx 122$). Scaling `margin = max(0.25, 1.50 / N_CLASSES)` (`0.30` for `C = 5`), relaxing isotropic pull-back slightly, and using consistent `row_margins` across training, benchmarking, and the $3 \times 4$ evaluation matrix preserves identical `C = 2` behavior while reaching **`93.33%–95.83%`** accuracy on 5-class `blobs`.
+4. **Multi-Class Decision Region & Band-Wall Contour Plotting (Notebook `05` Cells 5 & 15)**:
+   - Replaced hardcoded binary `[0.0]` contours (`0.0` is the center of Class `2` when `C = 5`, not a boundary!) and 6-color wraparound with a 10-color palette, a $2 \times 4$ multi-class landscape view (top row: predicted 5-class regions; bottom row: continuous geometric scalar fields with all $C - 1 = 4$ exact band-wall contours $b_c$), and exact multi-threshold contours in the $3 \times 4$ matrix.
+
+### Verified Results on Active `config.yaml` (`blobs`, `5 classes`, `[2, 10, 20, 10, 2]`, `gelu`)
+- **Cross-Entropy Baseline**: **`95.83%`**
+- **Geometric Volume-Element Loss**: **`95.00%`** (`L4 Gap = +4.155`)
+- **Geometric Metric Anisotropy Loss**: **`94.17%`** (`L4 Aniso Gap = +3.620`)
+- **Geometric Curvature Margin Loss**: **`93.33%`**
+
+
+---
+
+## Turn 33
+
+### User
+ok, great, check as well notebook 08
+
+### Assistant
+Audited, updated, rebuilt, and verified [notebooks/08-symmetric-coupled-multiclass.ipynb](notebooks/08-symmetric-coupled-multiclass.ipynb) (along with [src/diffgeom/geometry.py](src/diffgeom/geometry.py) and [scripts/build_all_notebooks.py](scripts/build_all_notebooks.py)) so that experimenting with 5-class `blobs` (`C = 5`, `gelu`, `[2, 10, 20, 10, 2]`)—as well as arbitrary class counts and architectures in `config.yaml`—works cleanly end-to-end across all five sections:
+
+1. **Synchronized `C_CFG`, Color Palettes, and Decoupled Architecture Shapes (Cell 0)**:
+   - Updated `C_CFG` after `get_synthetic_dataset(...)` (`C_CFG = max(C_CFG, int(max(y_cfg_tr.max(), y_cfg_te.max())) + 1)`), expanded `CLASS_COLORS` to 10 distinct colors (eliminating `C >= 5` color collisions), and separated `GEOM_2D_DIMS` (for the fixed 2D triple-junction/tetrahedron tasks) from `CFG_GEOM_DIMS` (for `X_cfg_tr`) so arbitrary `layer_dims` in `config.yaml` never trigger dimension mismatches.
+2. **Added Exact $S_C$-Equidistant `DeWitt Fibered (Sym^+_2)^C` to Section 2 & Generalized High-$d_0$ Support (`geometry.py` & Cell 2)**:
+   - Because $\dim(\mathrm{Sym}^+_2) = 3$, at most $C = 4$ prototypes can be mutually equidistant in a single 2D metric fiber; for $C = 5$, adding `New: DeWitt Fibered (Sym^+_2)^C` (`fibered_dewitt_simplex_loss` + new `fibered_dewitt_simplex_predict` exported in `diffgeom`, generalized to arbitrary `d_0 >= 2` via `compute_canonical_2frame`) provides exact $S_5$ equidistance alongside single-fiber `Sym^+_2`.
+   - Scaled `Prev: 1D Volume Band` margin adaptively with `n_cls` (`max(0.25, 1.50 / n_cls)`), guarded `coupled_subspace_predict` against empty reference-class slices, and increased the `Coupled Subspace Ortho` subset size (`min(140, len(X_tr))`) so all $C \ge 5$ classes are well populated.
+3. **Updated Section 4 Visualizations to Display Your Active `config.yaml` Dataset (`blobs`, `C = 5`)**:
+   - Previously, Section 4 hardcoded the 3-class triple-junction dataset; when `input_dim == 2`, it now renders the learned geometric representations directly on your configured dataset (`blobs (C=5)`): 5-class `DeWitt Fibered` Voronoi regions overlaid with learned Tissot ellipses, 5-basin `Geodesic Metric-Barrier` Voronoi walls, and the $5 \times 5$ block-diagonal Coupled Grassmannian Kernel matrix $\mathcal{K}_{\Theta \leftrightarrow \mathcal{M}}$ on sorted held-out test points.
+
+### Verified Results in Executed Notebook `08` (`0` errors, all `5` figures rendered)
+
+| Method | 3-Class Blobs Acc | 4-Class Tetra Acc | Configured `blobs (C=5)` Acc |
+| :--- | :---: | :---: | :---: |
+| **`SGD + Cross-Entropy`** | `99.17%` | `100.00%` | **`96.67%`** |
+| **`Prev: 1D Volume Band`** | `97.50%` | `99.17%` | **`94.17%`** |
+| **`New: DeWitt Simplex (SGD+FD)`** | `98.33%` | `100.00%` | **`93.33%`** |
+| **`New: DeWitt Simplex (Coupled NGD)`** | `98.33%` | `100.00%` | **`94.17%`** |
+| **`New: DeWitt Fibered (Sym^+_2)^C`** | `98.33%` | `100.00%` | **`95.83%`** |
+| **`New: Geodesic Barrier (Endpoint)`** | `98.33%` | `100.00%` | **`97.50%`** |
+| **`New: Coupled Subspace Ortho`** | `97.50%` | `100.00%` | **`95.00%`** |

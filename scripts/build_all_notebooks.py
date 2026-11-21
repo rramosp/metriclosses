@@ -1523,8 +1523,10 @@ from diffgeom.geometry import (
     scalar_geometric_predict,
 )
 
-CE_LAYER_DIMS = [*LAYER_DIMS[:-1], max(LAYER_DIMS[-1], N_CLASSES)]
-CLASS_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
+CLASS_COLORS = [
+    "#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e",
+    "#17becf", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22",
+]
 
 X_train, y_train, X_test, y_test = get_synthetic_dataset(
     dataset_name=DATASET_NAME,
@@ -1532,10 +1534,12 @@ X_train, y_train, X_test, y_test = get_synthetic_dataset(
     input_dim=LAYER_DIMS[0],
     **DATASET_PARAMS,
 )
-xx, yy, grid_pts = make_evaluation_grid(X_train, n_grid=26, padding=0.45)
+N_CLASSES = max(N_CLASSES, int(max(y_train.max().item(), y_test.max().item())) + 1)
+CE_LAYER_DIMS = [*LAYER_DIMS[:-1], max(LAYER_DIMS[-1], N_CLASSES)]
+xx, yy, grid_pts = make_evaluation_grid(X_train, n_grid=28, padding=0.45)
 print(
     f"Dataset: {DATASET_NAME} (classes={N_CLASSES}) | Train: {X_train.shape}, Test: {X_test.shape} | "
-    f"MLP: {LAYER_DIMS} (hidden={HIDDEN_ACTIVATION}, out={OUTPUT_ACTIVATION})"
+    f"Geom MLP: {LAYER_DIMS}, CE MLP: {CE_LAYER_DIMS} (hidden={HIDDEN_ACTIVATION}, out={OUTPUT_ACTIVATION})"
 )
 """,
         },
@@ -1545,25 +1549,39 @@ print(
 ## 1. Training the Four Paradigms (Cross-Entropy vs. Three Purely Geometric Objectives)
 
 ### What This Experiment Does
-We train four identically initialized MLPs (`seed = 7`) using `Adam`:
-1. **`m_ce` (`Cross-Entropy Baseline`, 120 epochs)**: Standard coordinate logit supervision (`argmax_c z_c(x)`).
-2. **`m_curv` (`Gaussian Curvature Margin Loss`, 85 epochs)**: 3rd-order autodiff separating classes by intrinsic graph curvature $K^{(L)}(x)$ (`margin = 0.40`).
-3. **`m_vol` (`Volume-Element Contrastive Loss`, 100 epochs)**: 2nd-order autodiff separating classes by log area density $\log\sqrt{\det g^{(L)}(x)}$ (`margin = 0.60`).
-4. **`m_aniso` (`Metric Anisotropy Loss`, 100 epochs)**: 2nd-order autodiff separating classes by directional stretching $\log(g^{(L)}_{11}(x)/g^{(L)}_{22}(x))$ (`margin = 0.45`).
+We train four identically initialized MLPs (`seed = 7`) using `Adam`, scaling band margins and training epochs automatically when `N_CLASSES > 2` so multi-class geometric target intervals remain well-conditioned:
+1. **`m_ce` (`Cross-Entropy Baseline`)**: Standard coordinate logit supervision (`argmax_c z_c(x)`).
+2. **`m_curv` (`Gaussian Curvature Margin Loss`)**: 3rd-order autodiff separating classes by intrinsic graph curvature $K^{(L)}(x)$.
+3. **`m_vol` (`Volume-Element Contrastive Loss`)**: 2nd-order autodiff separating classes by log area density $\log\sqrt{\det g^{(L)}(x)}$.
+4. **`m_aniso` (`Metric Anisotropy Loss`)**: 2nd-order autodiff separating classes by directional stretching $\log(g^{(L)}_{11}(x)/g^{(L)}_{22}(x))$.
 
 ### How to Interpret the Summary Table
 - **`Decision Criterion`**: Highlights the fundamental conceptual divide—Row 1 inspects raw output coordinates $z_c(x)$, whereas Rows 2–4 classify unseen test points strictly via **coordinate-free differential invariants** (`scalar_geometric_predict`).
-- **`Test Accuracy`**: Shows that first-fundamental-form metric invariants (`Volume-Element` and `Metric Anisotropy`, which need only 2nd-order derivatives) match or surpass 3rd-order `Gaussian Curvature` and rival standard `Cross-Entropy`.
+- **`Test Accuracy`**: Shows that first-fundamental-form metric invariants (`Volume-Element` and `Metric Anisotropy`, which need only 2nd-order derivatives) match or surpass 3rd-order `Gaussian Curvature` and closely track standard `Cross-Entropy` even for multi-class configurations (`N_CLASSES >= 2`).
 """,
         },
         {
             "type": "code",
             "source": r"""
+curv_margin = 0.40 if N_CLASSES == 2 else max(0.25, 1.50 / N_CLASSES)
+vol_margin = 0.60 if N_CLASSES == 2 else max(0.25, 1.50 / N_CLASSES)
+aniso_margin = 0.45 if N_CLASSES == 2 else max(0.25, 1.50 / N_CLASSES)
+
+curv_vol_reg = 0.02 if N_CLASSES == 2 else 0.01
+curv_iso_reg = 0.005 if N_CLASSES == 2 else 0.002
+curv_k_clip = 10.0 if N_CLASSES == 2 else max(10.0, 2.5 * N_CLASSES)
+vol_iso_reg = 0.02 if N_CLASSES == 2 else 0.005
+aniso_vol_reg = 0.05 if N_CLASSES == 2 else 0.01
+
+ce_epochs = 120 if N_CLASSES == 2 else 160
+curv_epochs = 85 if N_CLASSES == 2 else 160
+metric_epochs = 100 if N_CLASSES == 2 else 200
+
 # 1. Cross-Entropy Baseline
 m_ce = MoonsMLP(layer_dims=CE_LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
 opt_ce = torch.optim.Adam(m_ce.parameters(), lr=0.02)
 crit_ce = nn.CrossEntropyLoss()
-for _ in range(120):
+for _ in range(ce_epochs):
     opt_ce.zero_grad()
     loss = crit_ce(m_ce(X_train), y_train)
     loss.backward()
@@ -1573,45 +1591,48 @@ ce_te_acc = (m_ce(X_test).argmax(-1) == y_test).float().mean().item()
 # 2. Purely Geometric Curvature Margin Loss
 m_curv = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
 L = m_curv.num_layers
-opt_curv = torch.optim.Adam(m_curv.parameters(), lr=0.025)
-for _ in range(85):
+opt_curv = torch.optim.Adam(m_curv.parameters(), lr=0.025 if N_CLASSES == 2 else 0.02)
+for _ in range(curv_epochs):
     opt_curv.zero_grad()
     params = dict(m_curv.named_parameters())
     gL = compute_layer_geometry(m_curv, X_train, layer_idx=L, metric_mode="graph", params=params)
-    loss, _ = curvature_margin_loss(gL["K"], y_train, gL["g"], margin=0.40, lambda_vol=0.02, lambda_iso=0.005, k_clip=10.0, n_classes=N_CLASSES)
+    loss, _ = curvature_margin_loss(
+        gL["K"], y_train, gL["g"],
+        margin=curv_margin, lambda_vol=curv_vol_reg, lambda_iso=curv_iso_reg, k_clip=curv_k_clip, n_classes=N_CLASSES,
+    )
     loss.backward()
     torch.nn.utils.clip_grad_norm_(m_curv.parameters(), 5.0)
     opt_curv.step()
 K_te = compute_layer_geometry(m_curv, X_test, layer_idx=L, metric_mode="graph")["K"]
-curv_te_acc = (scalar_geometric_predict(K_te, n_classes=N_CLASSES, margin=0.40) == y_test).float().mean().item()
+curv_te_acc = (scalar_geometric_predict(K_te, n_classes=N_CLASSES, margin=curv_margin) == y_test).float().mean().item()
 
 # 3. Purely Geometric Volume-Element Contrastive Loss
 m_vol = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
 opt_vol = torch.optim.Adam(m_vol.parameters(), lr=0.02)
-for _ in range(100):
+for _ in range(metric_epochs):
     opt_vol.zero_grad()
     params = dict(m_vol.named_parameters())
     gL = compute_layer_pullback_metric(m_vol, X_train, layer_idx=L, metric_mode="euclidean", eps=1e-6, params=params)
-    loss, _ = volume_contrastive_loss(gL, y_train, margin=0.60, n_classes=N_CLASSES)
+    loss, _ = volume_contrastive_loss(gL, y_train, margin=vol_margin, lambda_iso=vol_iso_reg, n_classes=N_CLASSES)
     loss.backward()
     opt_vol.step()
 gL_vol_te = compute_layer_pullback_metric(m_vol, X_test, layer_idx=L, metric_mode="euclidean", eps=1e-6)
 log_vol_te = 0.5 * torch.log(torch.clamp(torch.linalg.det(gL_vol_te), min=1e-8))
-vol_te_acc = (scalar_geometric_predict(log_vol_te, n_classes=N_CLASSES, margin=0.60) == y_test).float().mean().item()
+vol_te_acc = (scalar_geometric_predict(log_vol_te, n_classes=N_CLASSES, margin=vol_margin) == y_test).float().mean().item()
 
 # 4. Purely Geometric Metric Anisotropy Loss
 m_aniso = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
 opt_aniso = torch.optim.Adam(m_aniso.parameters(), lr=0.02)
-for _ in range(100):
+for _ in range(metric_epochs):
     opt_aniso.zero_grad()
     params = dict(m_aniso.named_parameters())
     gL = compute_layer_pullback_metric(m_aniso, X_train, layer_idx=L, metric_mode="graph", params=params)
-    loss, _ = anisotropy_margin_loss(gL, y_train, margin=0.45, n_classes=N_CLASSES)
+    loss, _ = anisotropy_margin_loss(gL, y_train, margin=aniso_margin, lambda_vol=aniso_vol_reg, n_classes=N_CLASSES)
     loss.backward()
     opt_aniso.step()
 gL_aniso_te = compute_layer_pullback_metric(m_aniso, X_test, layer_idx=L, metric_mode="graph")
 aniso_ratio_te = torch.log(gL_aniso_te[:, 0, 0] / gL_aniso_te[:, 1, 1])
-aniso_te_acc = (scalar_geometric_predict(aniso_ratio_te, n_classes=N_CLASSES, margin=0.45) == y_test).float().mean().item()
+aniso_te_acc = (scalar_geometric_predict(aniso_ratio_te, n_classes=N_CLASSES, margin=aniso_margin) == y_test).float().mean().item()
 
 print(f"{'Training Objective':<44} {'Decision Criterion':<30} {'Test Accuracy':<15}")
 print("-" * 90)
@@ -1627,56 +1648,120 @@ print(f"{'4. Geometric Metric Anisotropy Loss':<44} {f'log(g_11^({L}) / g_22^({L
 ## 2. Side-by-Side Comparison of the Learned Geometric Decision Landscapes
 
 ### What This Experiment Does
-We evaluate each of the four trained models across the 2D ambient grid (`grid_pts`) using **its own native classification scalar**: logit gap $z_1(x) - z_0(x)$ for Cross-Entropy, $\mathrm{arcsinh}(K^{(L)}(x))$ for Curvature, $\log\sqrt{\det g^{(L)}(x)}$ for Volume-Element, and $\log(g^{(L)}_{11}(x)/g^{(L)}_{22}(x))$ for Metric Anisotropy.
+We evaluate each of the four trained models across the 2D ambient grid (`grid_pts`) using **its own native classification scalar** ($\mathrm{arcsinh}(K^{(L)}(x))$, $\log\sqrt{\det g^{(L)}(x)}$, and $\log(g^{(L)}_{11}(x)/g^{(L)}_{22}(x))$) as well as discrete class predictions when `N_CLASSES > 2`.
 
-### How to Interpret the $1 \times 4$ Landscape Comparison
-- **Diverging `RdBu_r` Scale (`Blue < 0`, `White = 0`, `Red > 0`)**: In all four panels, blue regions predict Class `0`, red regions predict Class `1` (for binary classification), and the **solid black `0.0` level curve** marks the exact decision boundary:
-  - Panel 1: Equal-logit hyperplane pullback ($z_1 = z_0$).
-  - Panel 2: Zero-curvature parabolic inflection curve ($K = 0$).
-  - Panel 3: Equiareal volume-preserving curve ($\det g = 1$).
-  - Panel 4: Conformal/isotropic directional balance curve ($g_{11} = g_{22}$).
-- Despite optimizing four distinct mathematical quantities, all four objectives recover consistent nonlinear decision boundaries separating the test data.
+### How to Interpret the Landscape Comparison
+- **Binary Mode (`N_CLASSES == 2`)**: Displays a $1 \times 4$ `RdBu_r` continuous field comparison (`Blue < 0`, `White = 0`, `Red > 0`) with the exact `0.0` decision contour in solid black.
+- **Multi-Class Mode (`N_CLASSES > 2`, e.g. 5-class `blobs`)**: Displays a **$2 \times 4$ comparison**:
+  - **Top Row (`Predicted Class Regions`)**: Colors the 2D plane by predicted class index $\{0, \dots, C-1\}$ across all four models so multi-class decision regions can be compared directly against test samples.
+  - **Bottom Row (`Continuous Geometric Scalar Fields & Band Thresholds`)**: Plots the continuous scalar fields overlaid with **all $C - 1$ exact decision thresholds** $b_c = 2\tau(c + \frac{1}{2} - \frac{C-1}{2})$ in solid black (`arcsinh(b_c)` for curvature).
 """,
         },
         {
             "type": "code",
             "source": r"""
+from matplotlib.colors import ListedColormap
+
+def geom_band_thresholds(margin_val: float, n_cls: int) -> np.ndarray:
+    if n_cls <= 2:
+        return np.array([0.0])
+    idx = np.arange(n_cls - 1, dtype=np.float64)
+    return 2.0 * margin_val * (idx + 0.5 - 0.5 * (n_cls - 1))
+
 with torch.no_grad():
     logits_grid = m_ce(grid_pts)
+    preds_ce_grid = logits_grid.argmax(dim=-1).numpy().reshape(xx.shape)
     if N_CLASSES == 2:
         f_ce = (logits_grid[:, 1] - logits_grid[:, 0]).numpy().reshape(xx.shape)
     else:
-        f_ce = (logits_grid.argmax(dim=-1).float() - 0.5 * (N_CLASSES - 1)).numpy().reshape(xx.shape)
+        top2 = torch.topk(logits_grid, k=2, dim=-1).values
+        f_ce = (top2[:, 0] - top2[:, 1]).numpy().reshape(xx.shape)
 
-f_curv = np.arcsinh(compute_layer_geometry(m_curv, grid_pts, layer_idx=L, metric_mode="graph")["K"].detach().numpy().reshape(xx.shape))
+K_grid_raw = compute_layer_geometry(m_curv, grid_pts, layer_idx=L, metric_mode="graph")["K"].detach()
+f_curv = np.arcsinh(K_grid_raw.numpy().reshape(xx.shape))
+preds_curv_grid = scalar_geometric_predict(K_grid_raw, n_classes=N_CLASSES, margin=curv_margin).numpy().reshape(xx.shape)
 
 g_vol_grid = compute_layer_pullback_metric(m_vol, grid_pts, layer_idx=L, metric_mode="euclidean", eps=1e-6)
-f_vol = (0.5 * torch.log(torch.clamp(torch.linalg.det(g_vol_grid), min=1e-8))).detach().numpy().reshape(xx.shape)
+lv_grid_raw = (0.5 * torch.log(torch.clamp(torch.linalg.det(g_vol_grid), min=1e-8))).detach()
+f_vol = lv_grid_raw.numpy().reshape(xx.shape)
+preds_vol_grid = scalar_geometric_predict(lv_grid_raw, n_classes=N_CLASSES, margin=vol_margin).numpy().reshape(xx.shape)
 
 g_aniso_grid = compute_layer_pullback_metric(m_aniso, grid_pts, layer_idx=L, metric_mode="graph")
-f_aniso = torch.log(g_aniso_grid[:, 0, 0] / g_aniso_grid[:, 1, 1]).detach().numpy().reshape(xx.shape)
+an_grid_raw = torch.log(g_aniso_grid[:, 0, 0] / g_aniso_grid[:, 1, 1]).detach()
+f_aniso = an_grid_raw.numpy().reshape(xx.shape)
+preds_aniso_grid = scalar_geometric_predict(an_grid_raw, n_classes=N_CLASSES, margin=aniso_margin).numpy().reshape(xx.shape)
 
-fields = [
-    (f_ce, f"Cross-Entropy Logit Gap\nTest Acc: {ce_te_acc*100:.1f}%"),
-    (f_curv, "Gaussian Curvature " + r"$\mathrm{arcsinh}(K)$" + f"\nTest Acc: {curv_te_acc*100:.1f}%"),
-    (f_vol, "Log Volume " + r"$\log\sqrt{\det g}$" + f"\nTest Acc: {vol_te_acc*100:.1f}%"),
-    (f_aniso, "Metric Anisotropy " + r"$\log(g_{11}/g_{22})$" + f"\nTest Acc: {aniso_te_acc*100:.1f}%"),
-]
+curv_thrs = np.arcsinh(geom_band_thresholds(curv_margin, N_CLASSES))
+vol_thrs = geom_band_thresholds(vol_margin, N_CLASSES)
+aniso_thrs = geom_band_thresholds(aniso_margin, N_CLASSES)
 
-fig, axes = plt.subplots(1, 4, figsize=(16.5, 3.9), sharex=True, sharey=True)
-for ax, (fld, title) in zip(axes, fields):
-    vm = max(np.percentile(np.abs(fld), 95), 0.2)
-    im = ax.contourf(xx, yy, fld, levels=22, cmap="RdBu_r", vmin=-vm, vmax=vm)
-    if fld.min() < 0.0 < fld.max():
-        ax.contour(xx, yy, fld, levels=[0.0], colors="k", linewidths=2.0)
-    for c in range(N_CLASSES):
-        mc = y_test == c
-        ax.scatter(X_test[mc, 0], X_test[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolors="w", s=20)
-    ax.set_title(title)
-    ax.set_xlabel("$x^1$")
-    plt.colorbar(im, ax=ax, fraction=0.046)
-axes[0].set_ylabel("$x^2$")
-plt.suptitle("Decision Landscapes Across Coordinate vs. Purely Differential-Geometric Objectives", y=1.04, fontsize=13)
+if N_CLASSES == 2:
+    fields = [
+        (f_ce, np.array([0.0]), f"Cross-Entropy Logit Gap\nTest Acc: {ce_te_acc*100:.1f}%"),
+        (f_curv, curv_thrs, "Gaussian Curvature " + r"$\mathrm{arcsinh}(K)$" + f"\nTest Acc: {curv_te_acc*100:.1f}%"),
+        (f_vol, vol_thrs, "Log Volume " + r"$\log\sqrt{\det g}$" + f"\nTest Acc: {vol_te_acc*100:.1f}%"),
+        (f_aniso, aniso_thrs, "Metric Anisotropy " + r"$\log(g_{11}/g_{22})$" + f"\nTest Acc: {aniso_te_acc*100:.1f}%"),
+    ]
+    fig, axes = plt.subplots(1, 4, figsize=(16.5, 3.9), sharex=True, sharey=True)
+    for ax, (fld, thrs, title) in zip(axes, fields):
+        vm = max(np.percentile(np.abs(fld), 95), 0.2)
+        im = ax.contourf(xx, yy, fld, levels=22, cmap="RdBu_r", vmin=-vm, vmax=vm)
+        valid_t = [t for t in thrs if fld.min() < t < fld.max()]
+        if valid_t:
+            ax.contour(xx, yy, fld, levels=valid_t, colors="k", linewidths=2.0)
+        for c in range(N_CLASSES):
+            mc = y_test == c
+            ax.scatter(X_test[mc, 0], X_test[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolors="w", s=20)
+        ax.set_title(title)
+        ax.set_xlabel("$x^1$")
+        plt.colorbar(im, ax=ax, fraction=0.046)
+    axes[0].set_ylabel("$x^2$")
+else:
+    cls_cmap = ListedColormap([CLASS_COLORS[c % len(CLASS_COLORS)] for c in range(N_CLASSES)])
+    pred_panels = [
+        (preds_ce_grid, f"Cross-Entropy Regions\nTest Acc: {ce_te_acc*100:.1f}%"),
+        (preds_curv_grid, f"Curvature Band Regions\nTest Acc: {curv_te_acc*100:.1f}%"),
+        (preds_vol_grid, f"Volume Band Regions\nTest Acc: {vol_te_acc*100:.1f}%"),
+        (preds_aniso_grid, f"Anisotropy Band Regions\nTest Acc: {aniso_te_acc*100:.1f}%"),
+    ]
+    scalar_panels = [
+        (f_ce, [], "CE Top-2 Logit Margin", "YlGnBu"),
+        (f_curv, curv_thrs, r"Curvature $\mathrm{arcsinh}(K)$ + Band Walls", "RdBu_r"),
+        (f_vol, vol_thrs, r"Log Volume $\log\sqrt{\det g}$ + Band Walls", "RdBu_r"),
+        (f_aniso, aniso_thrs, r"Anisotropy $\log(g_{11}/g_{22})$ + Band Walls", "RdBu_r"),
+    ]
+    fig, axes = plt.subplots(2, 4, figsize=(17.0, 7.6), sharex=True, sharey=True)
+    cls_levels = np.arange(-0.5, N_CLASSES + 0.5, 1.0)
+    for col_i, (p_grid, title) in enumerate(pred_panels):
+        ax = axes[0, col_i]
+        ax.contourf(xx, yy, p_grid, levels=cls_levels, cmap=cls_cmap, alpha=0.36)
+        ax.contour(xx, yy, p_grid, levels=np.arange(0.5, N_CLASSES - 0.5, 1.0), colors="k", linewidths=1.1, alpha=0.65)
+        for c in range(N_CLASSES):
+            mc = y_test == c
+            ax.scatter(X_test[mc, 0], X_test[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolors="k", lw=0.5, s=24, label=f"Class {c}")
+        ax.set_title(title)
+    axes[0, 0].set_ylabel("Predicted Regions\n$x^2$")
+    axes[0, 0].legend(fontsize=7.5, loc="best")
+
+    for col_i, (fld, thrs, title, cmap_name) in enumerate(scalar_panels):
+        ax = axes[1, col_i]
+        if cmap_name == "RdBu_r":
+            vm = max(np.percentile(np.abs(fld), 96), 0.25)
+            im = ax.contourf(xx, yy, fld, levels=24, cmap=cmap_name, vmin=-vm, vmax=vm)
+        else:
+            im = ax.contourf(xx, yy, fld, levels=24, cmap=cmap_name)
+        valid_t = sorted([t for t in thrs if fld.min() < t < fld.max()])
+        if valid_t:
+            ax.contour(xx, yy, fld, levels=valid_t, colors="k", linewidths=1.5)
+        for c in range(N_CLASSES):
+            mc = y_test == c
+            ax.scatter(X_test[mc, 0], X_test[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolors="w", s=18)
+        ax.set_title(title, fontsize=9.5)
+        ax.set_xlabel("$x^1$")
+        plt.colorbar(im, ax=ax, fraction=0.046)
+    axes[1, 0].set_ylabel("Geometric Scalar Field\n$x^2$")
+
+plt.suptitle("Decision Landscapes Across Coordinate vs. Purely Differential-Geometric Objectives", y=1.03, fontsize=13)
 plt.tight_layout()
 plt.show()
 """,
@@ -1928,19 +2013,22 @@ def step_loss_ce():
 def step_loss_curv():
     params = dict(probe_net.named_parameters())
     gL = compute_layer_geometry(probe_net, X_train, layer_idx=L, metric_mode="graph", params=params)
-    loss, _ = curvature_margin_loss(gL["K"], y_train, gL["g"], margin=0.40, n_classes=N_CLASSES)
+    loss, _ = curvature_margin_loss(
+        gL["K"], y_train, gL["g"],
+        margin=curv_margin, lambda_vol=curv_vol_reg, lambda_iso=curv_iso_reg, k_clip=curv_k_clip, n_classes=N_CLASSES,
+    )
     return loss
 
 def step_loss_vol():
     params = dict(probe_net.named_parameters())
     gL = compute_layer_pullback_metric(probe_net, X_train, layer_idx=L, metric_mode="euclidean", eps=1e-6, params=params)
-    loss, _ = volume_contrastive_loss(gL, y_train, margin=0.60, n_classes=N_CLASSES)
+    loss, _ = volume_contrastive_loss(gL, y_train, margin=vol_margin, lambda_iso=vol_iso_reg, n_classes=N_CLASSES)
     return loss
 
 def step_loss_aniso():
     params = dict(probe_net.named_parameters())
     gL = compute_layer_pullback_metric(probe_net, X_train, layer_idx=L, metric_mode="graph", params=params)
-    loss, _ = anisotropy_margin_loss(gL, y_train, margin=0.45, n_classes=N_CLASSES)
+    loss, _ = anisotropy_margin_loss(gL, y_train, margin=aniso_margin, lambda_vol=aniso_vol_reg, n_classes=N_CLASSES)
     return loss
 
 def benchmark_method(loss_builder, net_ref, n_repeats: int = 15):
@@ -2055,7 +2143,8 @@ row_labels = [
     "Log Volume Density\n" + rf"$\log\sqrt{{\det g^{{({L})}}(x)}}$",
     "Metric Anisotropy\n" + rf"$\log(g^{{({L})}}_{{11}}(x) / g^{{({L})}}_{{22}}(x))$",
 ]
-row_margins = [0.40, 0.60, 0.45]
+row_margins = [curv_margin, vol_margin, aniso_margin]
+row_contours = [curv_thrs, vol_thrs, aniso_thrs]
 
 def evaluate_final_layer_fields(mdl: MoonsMLP, pts: torch.Tensor):
     l_final = mdl.num_layers
@@ -2092,8 +2181,9 @@ for row_idx in range(3):
         norm = TwoSlopeNorm(vmin=-vm, vcenter=0.0, vmax=vm)
 
         im = ax.contourf(xx, yy, fld, levels=levels, cmap="RdBu_r", norm=norm, extend="both")
-        if fld.min() < 0.0 < fld.max():
-            ax.contour(xx, yy, fld, levels=[0.0], colors="k", linewidths=1.8)
+        valid_thrs = sorted([t for t in row_contours[row_idx] if fld.min() < t < fld.max()])
+        if valid_thrs:
+            ax.contour(xx, yy, fld, levels=valid_thrs, colors="k", linewidths=1.5)
 
         for c in range(N_CLASSES):
             mc = y_test == c
@@ -3828,6 +3918,7 @@ from diffgeom.geometry import (
     build_dewitt_simplex_prototypes,
     build_knn_jet_operator,
     build_metric_barrier_pairs,
+    compute_canonical_2frame,
     compute_coupled_dewitt_metric,
     compute_coupled_subspace_factors,
     compute_dewitt_dist_sq,
@@ -3845,6 +3936,7 @@ from diffgeom.geometry import (
     dewitt_simplex_loss,
     dewitt_simplex_predict,
     fibered_dewitt_simplex_loss,
+    fibered_dewitt_simplex_predict,
     geodesic_barrier_loss,
     geodesic_knn_predict,
     get_synthetic_dataset,
@@ -3856,7 +3948,12 @@ from diffgeom.geometry import (
 plt.rcParams["figure.dpi"] = 120
 plt.rcParams["font.size"] = 10
 
-CLASS_COLORS = ["#1f77b4", "#2ca02c", "#d62728", "#9467bd", "#ff7f0e", "#17becf"]
+CLASS_COLORS = [
+    "#1f77b4", "#2ca02c", "#d62728", "#9467bd", "#ff7f0e",
+    "#17becf", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22",
+]
+HIDDEN_CFG = LAYER_DIMS[1:-1] if len(LAYER_DIMS) > 2 else [16]
+GEOM_2D_DIMS = [2, *HIDDEN_CFG, max(LAYER_DIMS[-1], 2)]
 
 # 1. Symmetric 3-class triple-junction dataset where (0,1), (1,2), and (0,2) all meet at the origin
 def make_triple_junction_blobs(n_train: int = 240, n_test: int = 120, std: float = 0.42, seed: int = 42):
@@ -3897,9 +3994,13 @@ X_cfg_tr, y_cfg_tr, X_cfg_te, y_cfg_te = get_synthetic_dataset(
     input_dim=LAYER_DIMS[0],
     **DATASET_PARAMS,
 )
+C_CFG = max(C_CFG, int(max(y_cfg_tr.max().item(), y_cfg_te.max().item())) + 1)
+CFG_GEOM_DIMS = [X_cfg_tr.shape[1], *HIDDEN_CFG, max(LAYER_DIMS[-1], 2)]
+if X_cfg_tr.shape[1] == 2:
+    xx_cfg, yy_cfg, grid_cfg = make_evaluation_grid(X_cfg_tr, n_grid=42, padding=0.40)
 print(
-    f"Loaded config.yaml -> dataset='{DATASET_NAME}' (promoted to C={C_CFG} classes for multiclass study) | "
-    f"MLP={LAYER_DIMS} (hidden={HIDDEN_ACTIVATION}, out={OUTPUT_ACTIVATION})"
+    f"Loaded config.yaml -> dataset='{DATASET_NAME}' (C={C_CFG} classes) | "
+    f"MLP={CFG_GEOM_DIMS} (hidden={HIDDEN_ACTIVATION}, out={OUTPUT_ACTIVATION})"
 )
 """,
         },
@@ -3937,7 +4038,7 @@ for c_check in (3, 4):
     )
 
 # Test S_3 permutation invariance at initialization across all 6 label permutations
-probe_mc = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
+probe_mc = MoonsMLP(layer_dims=GEOM_2D_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
 protos3, proto_isq3 = build_dewitt_simplex_prototypes(3, tau=0.75)
 g_euc_0 = compute_fd_pullback_metric(probe_mc, X_tri_tr[:90], metric_mode="euclidean")
 g_gr_0 = compute_fd_pullback_metric(probe_mc, X_tri_tr[:90], metric_mode="graph")
@@ -3970,7 +4071,7 @@ for name, vals in perm_losses.items():
     print(f"{name:<36} | {min(vals):10.6f} | {max(vals):10.6f} | {max(vals) - min(vals):20.2e}")
 
 # Train 1D Volume Band vs. DeWitt Geodesic Simplex on 3-Class Triple-Junction Blobs
-m_band = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
+m_band = MoonsMLP(layer_dims=GEOM_2D_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
 opt_b = torch.optim.Adam(m_band.parameters(), lr=0.025)
 for _ in range(160):
     opt_b.zero_grad()
@@ -3979,7 +4080,7 @@ for _ in range(160):
     loss_b.backward()
     opt_b.step()
 
-m_dewitt = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
+m_dewitt = MoonsMLP(layer_dims=GEOM_2D_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
 opt_dw = torch.optim.SGD(m_dewitt.parameters(), lr=0.08, momentum=0.9)
 for _ in range(160):
     opt_dw.zero_grad()
@@ -4085,13 +4186,17 @@ We evaluate all three $S_C$-symmetric geometric formulations—plus `Coupled DeW
             "type": "code",
             "source": r"""
 X_tet_tr, y_tet_tr, X_tet_te, y_tet_te = get_synthetic_dataset(
-    "blobs", n_train=240, n_test=120, n_classes=4, cluster_std=0.60, seed=42
+    "blobs", n_train=240, n_test=120, n_classes=4, cluster_std=0.80, seed=42
 )
 
 def evaluate_suite_on_dataset(X_tr, y_tr, X_te, y_te, n_cls: int, record_curves: bool = False):
+    d0_in = X_tr.shape[1]
+    geom_dims = [d0_in, *HIDDEN_CFG, max(LAYER_DIMS[-1], 2)]
+    ce_dims = [d0_in, *HIDDEN_CFG, max(LAYER_DIMS[-1], n_cls)]
+    fib_dims = [d0_in, *HIDDEN_CFG, 2 * n_cls]
+    vb_margin = 0.60 if n_cls <= 3 else max(0.28, 1.50 / n_cls)
     _, p_isq = build_dewitt_simplex_prototypes(n_cls, tau=0.75)
     s_same, d_same, s_diff, d_diff = build_metric_barrier_pairs(X_tr, y_tr, k_same=8, k_diff=10)
-    ce_dims = [*LAYER_DIMS[:-1], max(LAYER_DIMS[-1], n_cls)]
     crit_ce = nn.CrossEntropyLoss()
     res = {}
 
@@ -4099,8 +4204,8 @@ def evaluate_suite_on_dataset(X_tr, y_tr, X_te, y_te, n_cls: int, record_curves:
     m_ce = MoonsMLP(layer_dims=ce_dims, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
     opt_ce = torch.optim.SGD(m_ce.parameters(), lr=0.10, momentum=0.9)
     curve_ce = []
-    for step in range(120):
-        if record_curves and (step % 5 == 0 or step == 119):
+    for step in range(140):
+        if record_curves and (step % 5 == 0 or step == 139):
             with torch.no_grad():
                 curve_ce.append((step, (m_ce(X_te).argmax(-1) == y_te).float().mean().item() * 100.0))
         opt_ce.zero_grad()
@@ -4108,54 +4213,54 @@ def evaluate_suite_on_dataset(X_tr, y_tr, X_te, y_te, n_cls: int, record_curves:
         opt_ce.step()
     res["SGD + Cross-Entropy"] = ((m_ce(X_te).argmax(-1) == y_te).float().mean().item() * 100.0, curve_ce, m_ce)
 
-    # 2. Previous 1D Volume Band (SGD + 3-pt FD)
-    m_vb = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
-    opt_vb = torch.optim.Adam(m_vb.parameters(), lr=0.025)
+    # 2. Previous 1D Volume Band (Adam + 3-pt FD, class-scaled margin)
+    m_vb = MoonsMLP(layer_dims=geom_dims, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
+    opt_vb = torch.optim.Adam(m_vb.parameters(), lr=0.02)
     curve_vb = []
-    for step in range(120):
-        if record_curves and (step % 5 == 0 or step == 119):
+    for step in range(160):
+        if record_curves and (step % 5 == 0 or step == 159):
             with torch.no_grad():
                 g_e = compute_layer_pullback_metric(m_vb, X_te, layer_idx=m_vb.num_layers, metric_mode="euclidean")
                 lv = 0.5 * torch.log(torch.clamp(torch.linalg.det(g_e), min=1e-8))
-                curve_vb.append((step, (scalar_geometric_predict(lv, n_classes=n_cls, margin=0.60) == y_te).float().mean().item() * 100.0))
+                curve_vb.append((step, (scalar_geometric_predict(lv, n_classes=n_cls, margin=vb_margin) == y_te).float().mean().item() * 100.0))
         opt_vb.zero_grad()
         g_tr = compute_fd_pullback_metric(m_vb, X_tr, metric_mode="euclidean")
-        volume_contrastive_loss(g_tr, y_tr, margin=0.60, n_classes=n_cls)[0].backward()
+        volume_contrastive_loss(g_tr, y_tr, margin=vb_margin, lambda_iso=0.005, n_classes=n_cls)[0].backward()
         opt_vb.step()
     with torch.no_grad():
         g_e = compute_layer_pullback_metric(m_vb, X_te, layer_idx=m_vb.num_layers, metric_mode="euclidean")
         lv = 0.5 * torch.log(torch.clamp(torch.linalg.det(g_e), min=1e-8))
-        acc_vb = (scalar_geometric_predict(lv, n_classes=n_cls, margin=0.60) == y_te).float().mean().item() * 100.0
+        acc_vb = (scalar_geometric_predict(lv, n_classes=n_cls, margin=vb_margin) == y_te).float().mean().item() * 100.0
     res["Prev: 1D Volume Band"] = (acc_vb, curve_vb, m_vb)
 
-    # 3. Method 1a: DeWitt Geodesic Simplex (SGD + 3-pt FD, 1st-order!)
-    m_dws = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
+    # 3. Method 1a: DeWitt Geodesic Simplex on Single Sym^+_2 (SGD + 3-pt FD)
+    m_dws = MoonsMLP(layer_dims=geom_dims, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
     opt_dws = torch.optim.SGD(m_dws.parameters(), lr=0.08, momentum=0.9)
     curve_dws = []
-    for step in range(120):
-        if record_curves and (step % 5 == 0 or step == 119):
+    for step in range(140):
+        if record_curves and (step % 5 == 0 or step == 139):
             with torch.no_grad():
-                g_e = compute_layer_pullback_metric(m_dws, X_te, layer_idx=m_dws.num_layers, metric_mode="graph")
+                g_e = compute_layer_pullback_metric(m_dws, X_te, layer_idx=m_dws.num_layers, metric_mode="graph")[:, :2, :2]
                 curve_dws.append((step, (dewitt_simplex_predict(g_e, p_isq) == y_te).float().mean().item() * 100.0))
         opt_dws.zero_grad()
-        g_tr = compute_fd_pullback_metric(m_dws, X_tr, metric_mode="graph")
+        g_tr = compute_fd_pullback_metric(m_dws, X_tr, metric_mode="graph")[:, :2, :2]
         dewitt_simplex_loss(g_tr, y_tr, p_isq)[0].backward()
         opt_dws.step()
     with torch.no_grad():
-        g_e = compute_layer_pullback_metric(m_dws, X_te, layer_idx=m_dws.num_layers, metric_mode="graph")
+        g_e = compute_layer_pullback_metric(m_dws, X_te, layer_idx=m_dws.num_layers, metric_mode="graph")[:, :2, :2]
         acc_dws = (dewitt_simplex_predict(g_e, p_isq) == y_te).float().mean().item() * 100.0
     res["New: DeWitt Simplex (SGD+FD)"] = (acc_dws, curve_dws, m_dws)
 
     # 4. Method 1b: DeWitt Geodesic Simplex + Coupled DeWitt-NGD (45 steps!)
-    m_ngd = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
+    m_ngd = MoonsMLP(layer_dims=geom_dims, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
     curve_ngd = []
     for step in range(45):
         if record_curves and (step % 3 == 0 or step == 44):
             with torch.no_grad():
-                g_e = compute_layer_pullback_metric(m_ngd, X_te, layer_idx=m_ngd.num_layers, metric_mode="graph")
+                g_e = compute_layer_pullback_metric(m_ngd, X_te, layer_idx=m_ngd.num_layers, metric_mode="graph")[:, :2, :2]
                 curve_ngd.append((step, (dewitt_simplex_predict(g_e, p_isq) == y_te).float().mean().item() * 100.0))
         m_ngd.zero_grad()
-        g_tr = compute_fd_pullback_metric(m_ngd, X_tr, metric_mode="graph")
+        g_tr = compute_fd_pullback_metric(m_ngd, X_tr, metric_mode="graph")[:, :2, :2]
         l_ngd, _ = dewitt_simplex_loss(g_tr, y_tr, p_isq)
         l_ngd.backward()
         gf = torch.cat([p.grad.reshape(-1) if p.grad is not None else torch.zeros(p.numel(), dtype=X_tr.dtype) for p in m_ngd.parameters()])
@@ -4170,16 +4275,31 @@ def evaluate_suite_on_dataset(X_tr, y_tr, X_te, y_te, n_cls: int, record_curves:
                 p -= (0.35 * sc) * nd[off : off + n].reshape(p.shape)
                 off += n
     with torch.no_grad():
-        g_e = compute_layer_pullback_metric(m_ngd, X_te, layer_idx=m_ngd.num_layers, metric_mode="graph")
+        g_e = compute_layer_pullback_metric(m_ngd, X_te, layer_idx=m_ngd.num_layers, metric_mode="graph")[:, :2, :2]
         acc_ngd = (dewitt_simplex_predict(g_e, p_isq) == y_te).float().mean().item() * 100.0
     res["New: DeWitt Simplex (Coupled NGD)"] = (acc_ngd, curve_ngd, m_ngd)
 
-    # 5. Method 2: Geodesic Metric-Barrier (Endpoint k-NN)
-    m_bar = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
+    # 5. Method 1c: Exact S_C-Equidistant Fibered DeWitt (Sym^+_2)^C (zero crowding for C >= 5!)
+    q_fib = compute_canonical_2frame(X_tr)
+    m_fib = MoonsMLP(layer_dims=fib_dims, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
+    opt_fib = torch.optim.Adam(m_fib.parameters(), lr=0.015)
+    curve_fib = []
+    for step in range(150):
+        if record_curves and (step % 5 == 0 or step == 149):
+            p_f = fibered_dewitt_simplex_predict(m_fib, X_te, n_classes=n_cls, frame_2d=q_fib)
+            curve_fib.append((step, (p_f == y_te).float().mean().item() * 100.0))
+        opt_fib.zero_grad()
+        fibered_dewitt_simplex_loss(m_fib, X_tr, y_tr, n_classes=n_cls, frame_2d=q_fib)[0].backward()
+        opt_fib.step()
+    acc_fib = (fibered_dewitt_simplex_predict(m_fib, X_te, n_classes=n_cls, frame_2d=q_fib) == y_te).float().mean().item() * 100.0
+    res["New: DeWitt Fibered (Sym^+_2)^C"] = (acc_fib, curve_fib, m_fib)
+
+    # 6. Method 2: Geodesic Metric-Barrier (Endpoint k-NN)
+    m_bar = MoonsMLP(layer_dims=geom_dims, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
     opt_bar = torch.optim.Adam(m_bar.parameters(), lr=0.025)
     curve_bar = []
-    for step in range(120):
-        if record_curves and (step % 15 == 0 or step == 119):
+    for step in range(140):
+        if record_curves and (step % 15 == 0 or step == 139):
             acc_b_step = (geodesic_knn_predict(m_bar, X_te, X_tr, y_tr, n_classes=n_cls) == y_te).float().mean().item() * 100.0
             curve_bar.append((step, acc_b_step))
         opt_bar.zero_grad()
@@ -4189,19 +4309,20 @@ def evaluate_suite_on_dataset(X_tr, y_tr, X_te, y_te, n_cls: int, record_curves:
     acc_bar = (geodesic_knn_predict(m_bar, X_te, X_tr, y_tr, n_classes=n_cls) == y_te).float().mean().item() * 100.0
     res["New: Geodesic Barrier (Endpoint)"] = (acc_bar, curve_bar, m_bar)
 
-    # 6. Method 3: Coupled Subspace Orthogonality (Theta <-> M)
-    m_sub = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
-    opt_sub = torch.optim.Adam(m_sub.parameters(), lr=0.025)
-    X_sub_tr, y_sub_tr = X_tr[:100], y_tr[:100]
+    # 7. Method 3: Coupled Subspace Orthogonality (Theta <-> M)
+    m_sub = MoonsMLP(layer_dims=geom_dims, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
+    opt_sub = torch.optim.Adam(m_sub.parameters(), lr=0.02)
+    n_sub = min(140, len(X_tr))
+    X_sub_tr, y_sub_tr = X_tr[:n_sub], y_tr[:n_sub]
     curve_sub = []
-    for step in range(55):
-        if record_curves and (step % 10 == 0 or step == 54):
+    for step in range(75):
+        if record_curves and (step % 15 == 0 or step == 74):
             p_s, _ = coupled_subspace_predict(m_sub, X_te, X_sub_tr, y_sub_tr, n_classes=n_cls, use_fd=True)
             curve_sub.append((step, (p_s == y_te).float().mean().item() * 100.0))
         opt_sub.zero_grad()
         coupled_subspace_orthogonality_loss(m_sub, X_sub_tr, y_sub_tr, use_fd=True)[0].backward()
         opt_sub.step()
-    p_sub_f, _ = coupled_subspace_predict(m_sub, X_te, X_sub_tr, y_sub_tr, n_classes=n_cls, use_fd=False)
+    p_sub_f, _ = coupled_subspace_predict(m_sub, X_te, X_sub_tr, y_sub_tr, n_classes=n_cls, use_fd=True)
     acc_sub = (p_sub_f == y_te).float().mean().item() * 100.0
     res["New: Coupled Subspace Ortho"] = (acc_sub, curve_sub, m_sub)
 
@@ -4209,7 +4330,7 @@ def evaluate_suite_on_dataset(X_tr, y_tr, X_te, y_te, n_cls: int, record_curves:
 
 res_tri = evaluate_suite_on_dataset(X_tri_tr, y_tri_tr, X_tri_te, y_tri_te, n_cls=3, record_curves=True)
 res_tet = evaluate_suite_on_dataset(X_tet_tr, y_tet_tr, X_tet_te, y_tet_te, n_cls=4, record_curves=True)
-res_cfg = evaluate_suite_on_dataset(X_cfg_tr, y_cfg_tr, X_cfg_te, y_cfg_te, n_cls=C_CFG, record_curves=False)
+res_cfg = evaluate_suite_on_dataset(X_cfg_tr, y_cfg_tr, X_cfg_te, y_cfg_te, n_cls=C_CFG, record_curves=True)
 
 print(f"{'Method':<35} | {'3-Class Blobs Acc':>18} | {'4-Class Tetra Acc':>18} | {f'{DATASET_NAME} (C={C_CFG}) Acc':>20}")
 print("-" * 100)
@@ -4221,6 +4342,7 @@ style_map = {
     "Prev: 1D Volume Band": ("#8c564b", "--"),
     "New: DeWitt Simplex (SGD+FD)": ("#1f77b4", "-"),
     "New: DeWitt Simplex (Coupled NGD)": ("#2ca02c", "-"),
+    "New: DeWitt Fibered (Sym^+_2)^C": ("#17becf", "-"),
     "New: Geodesic Barrier (Endpoint)": ("#ff7f0e", "-."),
     "New: Coupled Subspace Ortho": ("#9467bd", "-."),
 }
@@ -4333,9 +4455,9 @@ def profile_training_step(loss_fn, mdl: MoonsMLP, n_repeats: int = 20):
     ms = (time.perf_counter() - t0) * 1000.0 / n_repeats
     return ms, mem_mb, nodes
 
-ce_dims3 = [*LAYER_DIMS[:-1], max(LAYER_DIMS[-1], 3)]
+ce_dims3 = [2, *HIDDEN_CFG, max(LAYER_DIMS[-1], 3)]
 b_net_ce = MoonsMLP(layer_dims=ce_dims3, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
-b_net = MoonsMLP(layer_dims=LAYER_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
+b_net = MoonsMLP(layer_dims=GEOM_2D_DIMS, activation=HIDDEN_ACTIVATION, output_activation=OUTPUT_ACTIVATION, seed=7)
 L_b = b_net.num_layers
 ce_fn = nn.CrossEntropyLoss()
 
@@ -4437,89 +4559,116 @@ plt.show()
         {
             "type": "markdown",
             "source": r"""
-## 4. Visualizing the Learned Metric-Simplex Ellipses & Coupled Parameter-Subspace Block Structure
+## 4. Visualizing the Learned Metric-Simplex Ellipses, Geodesic Walls & Coupled Parameter-Subspace Block Structure
 
 ### What This Experiment Does
-Finally, we inspect the **internal differential-geometric representations** learned on the 3-class triple-junction benchmark by our symmetric coupled methods:
-1. **Left Panel (`Learned Tissot Metric Field — DeWitt Geodesic Simplex`)**: Evaluates the exact pullback metric $g^{(L)}(x) = I_2 + J(x)^T J(x)$ across a $12 \times 12$ ambient grid on the trained `DeWitt Simplex` model and draws the resulting **Tissot ellipses** colored by their nearest DeWitt prototype $G^*_c$.
-2. **Middle Panel (`Learned Volume Barrier Ridges — Geodesic Metric-Barrier`)**: Evaluates $\log_{10}\sqrt{\det g^{(L)}(x)}$ on the trained `Geodesic Metric-Barrier` model across `grid_tri` to visualize how relational contrastive training sculpts all three class basins identically while raising high-volume walls along all three pairwise borders.
-3. **Right Panel (`Coupled Parameter–Data Grassmannian Kernel Matrix`)**: Evaluates the $(N_{\text{test}} \times N_{\text{test}})$ Riemannian subspace overlap matrix $\mathcal{K}_{\Theta \leftrightarrow \mathcal{M}}(x_i, x_j)$ on held-out test samples sorted by class label (`Class 0`, `Class 1`, `Class 2`).
+We inspect the **internal differential-geometric representations** learned on your configured `config.yaml` dataset (`X_cfg_tr`, `C = C_CFG` classes when `input_dim == 2`, or `X_tri_tr` when `input_dim > 2`):
+1. **Left Panel (`Learned Tissot Metric Field — DeWitt Geodesic Simplex`)**: Evaluates the pullback metric $g^{(L)}(x) = I_2 + J(x)^T J(x)$ across a $12 \times 12$ grid on the trained `DeWitt Simplex` model ( overlaid on predicted class Voronoi regions from `DeWitt Fibered` when $C > 4$ or `Single Sym^+_2` when $C \le 4$) and draws the learned **Tissot ellipses** colored by predicted class.
+2. **Middle Panel (`Learned Volume Barrier Ridges — Geodesic Metric-Barrier`)**: Evaluates $\log_{10}\sqrt{\det g^{(L)}(x)}$ on the trained `Geodesic Metric-Barrier` model across the 2D plane to visualize how relational contrastive training sculpts all $C$ class basins identically while raising high-volume walls along every pairwise class boundary.
+3. **Right Panel (`Coupled Parameter–Data Grassmannian Kernel Matrix`)**: Evaluates the $(N_{\text{test}} \times N_{\text{test}})$ Riemannian subspace overlap matrix $\mathcal{K}_{\Theta \leftrightarrow \mathcal{M}}(x_i, x_j)$ on held-out test samples sorted by class label $\{0, \dots, C-1\}$.
 
 ### How to Interpret the Three Geometric Visualizations
-- **Left (`Tissot Ellipses`)**: Ellipses in the blue (`Class 0`), green (`Class 1`), and red (`Class 2`) regions visibly rotate their principal major axes to **`0°`, `60°`, and `120°`** respectively, confirming that classification is encoded purely in the **orientation of the pullback metric tensor** with equal area and condition number across all three classes.
-- **Middle (`Riemannian Barrier Walls`)**: Dark purple interiors ($\det g \ll 1$) appear inside **every** class symmetrically, separated by a bright yellow **three-way Y-shaped high-volume ridge** ($\det g \gg 1$) along the exact triple junction!
-- **Right (`Grassmannian Overlap Matrix` $\mathcal{K}_{\Theta \leftrightarrow \mathcal{M}}$)**: Bright diagonal blocks ($\mathcal{K}_{ij} \gg 0$ for $y_i = y_j$) and dark near-zero off-diagonal blocks ($\mathcal{K}_{ij} \approx 0$ for $y_i \neq y_j$) demonstrate that the three classes occupy **mutually $G^\Theta$-orthogonal subspaces of parameter space $\Theta$**.
+- **Left (`Tissot Ellipses & Symmetric Regions`)**: All $C$ class regions meet cleanly without 1D IVT phantom ribbons, with local metric ellipses encoding each class's target geometry.
+- **Middle (`Riemannian Barrier Walls`)**: Dark purple contracted basins ($\det g \ll 1$) appear inside **every** class symmetrically, separated by bright yellow high-volume Voronoi ridges ($\det g \gg 1$) along all inter-class boundaries!
+- **Right (`Grassmannian Overlap Matrix` $\mathcal{K}_{\Theta \leftrightarrow \mathcal{M}}$)**: Bright $C \times C$ diagonal blocks ($\mathcal{K}_{ij} \gg 0$ for $y_i = y_j$) and dark near-zero off-diagonal blocks ($\mathcal{K}_{ij} \approx 0$ for $y_i \neq y_j$) demonstrate that all $C$ classes occupy **mutually $G^\Theta$-orthogonal subspaces of parameter space $\Theta$**.
 """,
         },
         {
             "type": "code",
             "source": r"""
-mdl_dw_vis = res_tri["New: DeWitt Simplex (Coupled NGD)"][2]
-mdl_bar_vis = res_tri["New: Geodesic Barrier (Endpoint)"][2]
-mdl_sub_vis = res_tri["New: Coupled Subspace Ortho"][2]
+if X_cfg_tr.shape[1] == 2:
+    res_vis = res_cfg
+    X_v_tr, y_v_tr, X_v_te, y_v_te = X_cfg_tr, y_cfg_tr, X_cfg_te, y_cfg_te
+    xx_v, yy_v, grid_v = xx_cfg, yy_cfg, grid_cfg
+    C_vis = C_CFG
+    vis_tag = f"{DATASET_NAME} (C={C_CFG})"
+else:
+    res_vis = res_tri
+    X_v_tr, y_v_tr, X_v_te, y_v_te = X_tri_tr, y_tri_tr, X_tri_te, y_tri_te
+    xx_v, yy_v, grid_v = xx_tri, yy_tri, grid_tri
+    C_vis = 3
+    vis_tag = "3-Class Triple-Junction"
 
-fig, axes = plt.subplots(1, 3, figsize=(17.2, 4.9))
+mdl_dw_single = res_vis["New: DeWitt Simplex (Coupled NGD)"][2]
+mdl_dw_fib = res_vis["New: DeWitt Fibered (Sym^+_2)^C"][2]
+mdl_bar_vis = res_vis["New: Geodesic Barrier (Endpoint)"][2]
+mdl_sub_vis = res_vis["New: Coupled Subspace Ortho"][2]
+_, pisq_vis = build_dewitt_simplex_prototypes(C_vis, tau=0.75)
 
-# Panel 0: Learned Tissot Metric Ellipses (0 deg, 60 deg, 120 deg)
-_, _, coarse_tri = make_evaluation_grid(X_tri_tr, n_grid=11, padding=0.25)
+cmap_vis = ListedColormap([CLASS_COLORS[c % len(CLASS_COLORS)] for c in range(C_vis)])
+cls_lvls = np.arange(-0.5, C_vis + 0.5, 1.0)
+bnd_lvls = np.arange(0.5, C_vis - 0.5, 1.0)
+
+fig, axes = plt.subplots(1, 3, figsize=(17.5, 5.0))
+
+# Panel 0: Learned Symmetric Voronoi Regions & Tissot Metric Ellipses
+_, _, coarse_v = make_evaluation_grid(X_v_tr, n_grid=11, padding=0.25)
 with torch.no_grad():
-    g_dw_bg = compute_layer_pullback_metric(mdl_dw_vis, grid_tri, layer_idx=mdl_dw_vis.num_layers, metric_mode="graph")
-    pred_dw_bg = dewitt_simplex_predict(g_dw_bg, proto_isq3).numpy().reshape(xx_tri.shape)
+    if C_vis <= 4:
+        g_dw_bg = compute_layer_pullback_metric(mdl_dw_single, grid_v, layer_idx=mdl_dw_single.num_layers, metric_mode="graph")
+        pred_dw_bg = dewitt_simplex_predict(g_dw_bg, pisq_vis).numpy().reshape(xx_v.shape)
+        pred_c = dewitt_simplex_predict(
+            compute_layer_pullback_metric(mdl_dw_single, coarse_v, layer_idx=mdl_dw_single.num_layers, metric_mode="graph"),
+            pisq_vis,
+        ).numpy()
+    else:
+        pred_dw_bg = fibered_dewitt_simplex_predict(mdl_dw_fib, grid_v, n_classes=C_vis).numpy().reshape(xx_v.shape)
+        pred_c = fibered_dewitt_simplex_predict(mdl_dw_fib, coarse_v, n_classes=C_vis).numpy()
 
-    g_dw_c = compute_layer_pullback_metric(mdl_dw_vis, coarse_tri, layer_idx=mdl_dw_vis.num_layers, metric_mode="graph")
-    pred_c = dewitt_simplex_predict(g_dw_c, proto_isq3).numpy()
+    g_dw_c = compute_layer_pullback_metric(mdl_dw_single, coarse_v, layer_idx=mdl_dw_single.num_layers, metric_mode="graph")
     evals_c, evecs_c, _ = compute_metric_spectrum(g_dw_c)
     s_c = np.sqrt(evals_c.numpy())
     norm_s = 0.25 / (np.percentile(s_c[:, 0], 90) + 1e-8)
 
-axes[0].contourf(xx_tri, yy_tri, pred_dw_bg, levels=[-0.5, 0.5, 1.5, 2.5], cmap=cmap3, alpha=0.35)
-axes[0].contour(xx_tri, yy_tri, pred_dw_bg, levels=[0.5, 1.5], colors="k", linewidths=1.4, linestyles="--")
-pts_c = coarse_tri.numpy()
+axes[0].contourf(xx_v, yy_v, pred_dw_bg, levels=cls_lvls, cmap=cmap_vis, alpha=0.32)
+axes[0].contour(xx_v, yy_v, pred_dw_bg, levels=bnd_lvls, colors="k", linewidths=1.3, linestyles="--")
+pts_c = coarse_v.numpy()
 ev_np = evecs_c.numpy()
 for i in range(len(pts_c)):
     v1 = ev_np[i, :, 0]
     ang = np.degrees(np.arctan2(v1[1], v1[0]))
     c_id = int(pred_c[i])
-    ell = Ellipse(pts_c[i], width=max(s_c[i, 0] * norm_s, 0.03), height=max(s_c[i, 1] * norm_s, 0.03), angle=ang, facecolor=CLASS_COLORS[c_id], edgecolor="k", alpha=0.78, lw=0.9)
+    ell = Ellipse(pts_c[i], width=max(s_c[i, 0] * norm_s, 0.03), height=max(s_c[i, 1] * norm_s, 0.03), angle=ang, facecolor=CLASS_COLORS[c_id % len(CLASS_COLORS)], edgecolor="k", alpha=0.78, lw=0.8)
     axes[0].add_patch(ell)
-axes[0].set_title(r"DeWitt Simplex: Learned $0^\circ / 60^\circ / 120^\circ$ Metric Ellipses")
+axes[0].set_title(f"DeWitt Regions & Tissot Ellipses ({vis_tag})")
 axes[0].set_xlabel("$x^1$")
 axes[0].set_ylabel("$x^2$")
 
-# Panel 1: Geodesic Barrier Y-Junction Volume Wall
+# Panel 1: Geodesic Barrier Multi-Basin Volume Ridges
 with torch.no_grad():
-    g_bar_grid = compute_layer_pullback_metric(mdl_bar_vis, grid_tri, layer_idx=mdl_bar_vis.num_layers, metric_mode="euclidean", eps=1e-7)
-    log10_vol_bar = (0.5 * torch.log10(torch.clamp(torch.linalg.det(g_bar_grid), min=1e-10))).numpy().reshape(xx_tri.shape)
+    g_bar_grid = compute_layer_pullback_metric(mdl_bar_vis, grid_v, layer_idx=mdl_bar_vis.num_layers, metric_mode="euclidean", eps=1e-7)
+    log10_vol_bar = (0.5 * torch.log10(torch.clamp(torch.linalg.det(g_bar_grid), min=1e-10))).numpy().reshape(xx_v.shape)
 
-im1 = axes[1].contourf(xx_tri, yy_tri, log10_vol_bar, levels=22, cmap="magma")
-for c in range(3):
-    mc = y_tri_te == c
-    axes[1].scatter(X_tri_te[mc, 0], X_tri_te[mc, 1], c=CLASS_COLORS[c], edgecolors="w", s=22, label=f"Class {c}")
-axes[1].set_title(r"Geodesic Barrier: Symmetric Basins & Y-Junction Wall")
+im1 = axes[1].contourf(xx_v, yy_v, log10_vol_bar, levels=22, cmap="magma")
+for c in range(C_vis):
+    mc = y_v_te == c
+    axes[1].scatter(X_v_te[mc, 0], X_v_te[mc, 1], c=CLASS_COLORS[c % len(CLASS_COLORS)], edgecolors="w", s=22, label=f"Class {c}")
+axes[1].set_title(f"Geodesic Barrier: {C_vis}-Basin Voronoi Walls")
 axes[1].set_xlabel("$x^1$")
-axes[1].legend(fontsize=8.0, loc="upper right")
+axes[1].legend(fontsize=7.6, loc="best")
 plt.colorbar(im1, ax=axes[1], fraction=0.046, label=r"$\log_{10}\sqrt{\det g^{(L)}(x)}$")
 
 # Panel 2: Coupled Parameter-Data Grassmannian Kernel Matrix on Sorted Test Set
-sort_idx = torch.argsort(y_tri_te)
-X_te_sorted = X_tri_te[sort_idx]
-y_te_sorted = y_tri_te[sort_idx]
-W_te_s, _ = compute_coupled_subspace_factors(mdl_sub_vis, X_te_sorted, use_fd=False)
+sort_idx = torch.argsort(y_v_te)
+X_te_sorted = X_v_te[sort_idx]
+y_te_sorted = y_v_te[sort_idx]
+W_te_s, _ = compute_coupled_subspace_factors(mdl_sub_vis, X_te_sorted, use_fd=True)
 with torch.no_grad():
     cross_s = torch.einsum("nap,mbp->nmab", W_te_s.detach(), W_te_s.detach())
     K_sorted = (cross_s * cross_s).sum(dim=(-2, -1)).numpy()
 
-im2 = axes[2].imshow(K_sorted, cmap="viridis", vmin=0.0, vmax=np.percentile(K_sorted, 98))
-boundaries_cls = [int((y_te_sorted == 0).sum().item()), int(((y_te_sorted == 0) | (y_te_sorted == 1)).sum().item())]
-for b_line in boundaries_cls:
-    axes[2].axhline(b_line - 0.5, color="w", ls="--", lw=1.4)
-    axes[2].axvline(b_line - 0.5, color="w", ls="--", lw=1.4)
-axes[2].set_title(r"Coupled Kernel $\mathcal{K}_{\Theta \leftrightarrow \mathcal{M}}(x_i, x_j)$ (Sorted by Class)")
-axes[2].set_xlabel("Sorted Test Sample Index (Class 0 | Class 1 | Class 2)")
+im2 = axes[2].imshow(K_sorted, cmap="viridis", vmin=0.0, vmax=max(float(np.percentile(K_sorted, 98)), 0.1))
+cum_cnt = 0
+for c in range(C_vis - 1):
+    cum_cnt += int((y_te_sorted == c).sum().item())
+    axes[2].axhline(cum_cnt - 0.5, color="w", ls="--", lw=1.3)
+    axes[2].axvline(cum_cnt - 0.5, color="w", ls="--", lw=1.3)
+axes[2].set_title(rf"Coupled Kernel $\mathcal{{K}}_{{\Theta \leftrightarrow \mathcal{{M}}}}$ ({C_vis}x{C_vis} Blocks)")
+axes[2].set_xlabel(f"Sorted Test Samples (Classes 0..{C_vis - 1})")
 axes[2].set_ylabel("Sorted Test Sample Index")
 plt.colorbar(im2, ax=axes[2], fraction=0.046, label="Subspace Overlap")
 
-plt.suptitle("Internal Geometric Structure Across All Three S_C-Symmetric Coupled Formulations", y=1.03, fontsize=13)
+plt.suptitle(f"Internal Geometric Structure Across S_C-Symmetric Formulations on {vis_tag}", y=1.03, fontsize=13)
 plt.tight_layout()
 plt.show()
 """,

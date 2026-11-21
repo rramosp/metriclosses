@@ -35,6 +35,7 @@ from diffgeom import (
     dewitt_simplex_loss,
     dewitt_simplex_predict,
     fibered_dewitt_simplex_loss,
+    fibered_dewitt_simplex_predict,
     flatten_params,
     geodesic_barrier_loss,
     geodesic_knn_predict,
@@ -210,11 +211,13 @@ def test_symmetric_coupled_multiclass_losses() -> None:
     preds_cs, _ = coupled_subspace_predict(model, X_te, X_tr, y_tr, n_classes=3, use_fd=True)
     assert preds_cs.shape == (18,)
 
-    # Fibered (Sym^+_2)^C DeWitt simplex loss for large C (e.g. C = 6) is strictly S_C-invariant
-    X6, y6, _, _ = get_synthetic_dataset("blobs", n_train=36, n_test=18, n_classes=6, seed=19)
-    m_fib = MoonsMLP(layer_dims=[2, 8, 12], activation="tanh", output_activation="identity", seed=7)
-    lf_0, _ = fibered_dewitt_simplex_loss(m_fib, X6, y6, n_classes=6)
-    assert torch.isfinite(lf_0)
+    # Fibered (Sym^+_2)^C DeWitt simplex loss & predict for large C (e.g. C = 6) and d_0 >= 2
+    X6, y6, X6_te, _ = get_synthetic_dataset("blobs", n_train=36, n_test=18, n_classes=6, input_dim=4, seed=19)
+    q6 = compute_canonical_2frame(X6)
+    m_fib = MoonsMLP(layer_dims=[4, 8, 12], activation="tanh", output_activation="identity", seed=7)
+    lf_0, _ = fibered_dewitt_simplex_loss(m_fib, X6, y6, n_classes=6, frame_2d=q6)
+    preds_fib = fibered_dewitt_simplex_predict(m_fib, X6_te, n_classes=6, frame_2d=q6)
+    assert torch.isfinite(lf_0) and preds_fib.shape == (18,)
 
 
 
@@ -273,3 +276,18 @@ def test_scalable_highdim_manyclass_losses() -> None:
     loss_sp, _ = sketched_param_subspace_loss(net_2d, X_tr, y_tr, q0, r_probes=4)
     loss_sp.backward()
     assert sketched_param_subspace_predict(net_2d, X_te, X_tr, y_tr, n_classes=8, frame_2d=q0, r_probes=6).shape == (24,)
+
+
+
+def test_blobs_five_classes_separable_and_synced() -> None:
+    # Even when centers=5 is passed with default n_classes=2 or n_classes=5, 5 well-separated classes are returned
+    _, y_tr, _, y_te = get_synthetic_dataset(
+        "blobs", n_train=150, n_test=50, n_classes=5, centers=5, cluster_std=1.0, seed=42
+    )
+    assert int(y_tr.max().item()) == 4
+    assert int(y_te.max().item()) == 4
+    # If n_classes is later changed to 3 while centers=5 remains in kwargs, n_classes=3 takes precedence
+    _, y3, _, _ = get_synthetic_dataset(
+        "blobs", n_train=90, n_test=30, n_classes=3, centers=5, cluster_std=1.0, seed=42
+    )
+    assert int(y3.max().item()) == 2

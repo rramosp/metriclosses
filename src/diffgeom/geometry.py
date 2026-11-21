@@ -100,9 +100,10 @@ def get_synthetic_dataset(
             X = np.vstack(xs)
             y = np.concatenate(ys)
     elif key == "blobs":
-        cluster_std = float(dataset_kwargs.get("cluster_std", max(noise * 6.0, 0.20)))
-        centers = dataset_kwargs.get("centers", n_classes)
-        center_box = dataset_kwargs.get("center_box", (-3.0, 3.0))
+        cluster_std = float(dataset_kwargs.get("cluster_std", max(noise * 4.0, 0.65)))
+        raw_centers = dataset_kwargs.get("centers", n_classes)
+        centers = n_classes if (isinstance(raw_centers, int) and n_classes != 2) else raw_centers
+        center_box = dataset_kwargs.get("center_box", (-10.0, 10.0))
         X, y = make_blobs(
             n_samples=n_total,
             n_features=input_dim,
@@ -1648,12 +1649,19 @@ def coupled_subspace_predict(
         K_eval_ref = (cross * cross).sum(dim=(-2, -1))
         cls_scores = torch.stack(
             [K_eval_ref[:, y_ref == c].mean(dim=-1) for c in range(n_classes)],
+            [
+                K_eval_ref[:, y_ref == c].mean(dim=-1)
+                if (y_ref == c).any()
+                else torch.zeros(X_eval.shape[0], dtype=X_eval.dtype, device=X_eval.device)
+                for c in range(n_classes)
+            ],
             dim=-1,
         )
         return cls_scores.argmax(dim=-1), cls_scores
 
 
 def fibered_dewitt_simplex_loss(
+def _fibered_dewitt_prod_dist_sq(
     model: MoonsMLP,
     X: torch.Tensor,
     y: torch.Tensor,
@@ -1671,11 +1679,15 @@ def fibered_dewitt_simplex_loss(
     FD pass (for d_0 = 2, 3N evaluations) and computes all C product-manifold DeWitt squared
     distances in O(N C) operations via S_rest(n) + (d^2_act(n, c) - d^2_rest(n, c)).
     """
+    frame_2d: torch.Tensor | None = None,
+) -> torch.Tensor:
     N, d0 = X.shape
     if d0 != 2:
         raise ValueError(f"fibered_dewitt_simplex_loss expects 2D fiber base (got d_0={d0})")
     basis = torch.eye(2, dtype=X.dtype, device=X.device) * h
     X_shifted = (X[:, None, :] + basis[None, :, :]).reshape(2 * N, 2)
+    q_frame = compute_canonical_2frame(X) if frame_2d is None else frame_2d
+    X_shifted = (X[:, None, :] + h * q_frame.T[None, :, :]).reshape(2 * N, d0)
     Z_all = model(torch.cat([X, X_shifted], dim=0))  # (3N, 2*C)
     z0 = Z_all[:N].reshape(N, n_classes, 2)
     z_shift = Z_all[N:].reshape(N, 2, n_classes, 2)
@@ -1695,15 +1707,51 @@ def fibered_dewitt_simplex_loss(
     d2_pair = compute_dewitt_dist_sq(g_fibers.reshape(N * n_classes, 2, 2), ref_two).reshape(N, n_classes, 2)
     d2_act = d2_pair[:, :, 0]   # (N, C)
     d2_rest = d2_pair[:, :, 1]  # (N, C)
+    d2_act = d2_pair[:, :, 0]
+    d2_rest = d2_pair[:, :, 1]
+    return d2_rest.sum(dim=-1, keepdim=True) + (d2_act - d2_rest)
 
     # Product-manifold squared DeWitt distance to prototype c: sum_{k != c} d2_rest(k) + d2_act(c)
     d2_prod = d2_rest.sum(dim=-1, keepdim=True) + (d2_act - d2_rest)  # (N, C)
+
+def fibered_dewitt_simplex_loss(
+    model: MoonsMLP,
+    X: torch.Tensor,
+    y: torch.Tensor,
+    n_classes: int,
+    h: float = 1e-3,
+    tau: float = 0.75,
+    graph_margin: float = 0.35,
+    temperature: float = 2.0,
+    anchor_weight: float = 0.08,
+    frame_2d: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Exact S_C-equidistant product-manifold DeWitt simplex loss on (Sym^+_2)^C in O(N C) time."""
+    d2_prod = _fibered_dewitt_prod_dist_sq(
+        model, X, n_classes=n_classes, h=h, tau=tau, graph_margin=graph_margin, frame_2d=frame_2d
+    )
     loss_voronoi = F.cross_entropy(-0.5 * temperature * d2_prod, y)
     loss_anchor = d2_prod.gather(1, y.unsqueeze(1)).mean()
     total = loss_voronoi + anchor_weight * loss_anchor
     with torch.no_grad():
         acc = (d2_prod.argmin(dim=-1) == y).to(X.dtype).mean().item()
     return total, {"loss_total": total.item(), "geom_acc": acc}
+
+
+def fibered_dewitt_simplex_predict(
+    model: MoonsMLP,
+    X_eval: torch.Tensor,
+    n_classes: int,
+    h: float = 1e-3,
+    tau: float = 0.75,
+    graph_margin: float = 0.35,
+    frame_2d: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Classify points X_eval by nearest exact S_C-equidistant product-manifold prototype on (Sym^+_2)^C."""
+    with torch.no_grad():
+        return _fibered_dewitt_prod_dist_sq(
+            model, X_eval, n_classes=n_classes, h=h, tau=tau, graph_margin=graph_margin, frame_2d=frame_2d
+        ).argmin(dim=-1)
 
 
 
